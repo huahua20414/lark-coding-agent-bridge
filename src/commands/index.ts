@@ -801,11 +801,11 @@ interface CodexResumeMessage {
 function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMessage | undefined {
   const ongoing = [...turns].reverse().find((turn) => isCodexResumeWatchableTurn(turn));
   if (ongoing) {
-    const text = ongoing.assistant ?? ongoing.user;
+    const text = ongoing.assistant ?? ongoing.finalAssistant ?? ongoing.user;
     if (text) {
       return {
         label: '正在进行的消息',
-        role: ongoing.assistant ? 'Codex' : '用户',
+        role: ongoing.assistant || ongoing.finalAssistant ? 'Codex' : '用户',
         text,
         ...(ongoing.status ? { status: ongoing.status } : {}),
         ...(ongoing.completedAtMs !== undefined ? { completedAtMs: ongoing.completedAtMs } : {}),
@@ -813,11 +813,11 @@ function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMess
     }
   }
   for (const turn of [...turns].reverse()) {
-    if (turn.assistant) {
+    if (turn.finalAssistant) {
       return {
         label: '最新消息',
         role: 'Codex',
-        text: turn.assistant,
+        text: turn.finalAssistant,
         ...(turn.status ? { status: turn.status } : {}),
         ...(turn.completedAtMs !== undefined ? { completedAtMs: turn.completedAtMs } : {}),
       };

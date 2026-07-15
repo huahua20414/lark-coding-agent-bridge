@@ -233,7 +233,8 @@ describe('agent-aware resume commands', () => {
       'thread-alpha-secret',
       Array.from({ length: 12 }, (_, i) => ({
         user: `question ${i + 1}`,
-        assistant: `answer ${i + 1}`,
+        assistant: `progress ${i + 1}\n\nanswer ${i + 1}`,
+        finalAssistant: `answer ${i + 1}`,
       })),
     );
 
@@ -244,6 +245,7 @@ describe('agent-aware resume commands', () => {
     const reply = lastMarkdown(h.channel);
     expect(reply).toContain('最新消息');
     expect(reply).toContain('answer 12');
+    expect(reply).not.toContain('progress 12');
     expect(reply).not.toContain('question 12');
     expect(reply).not.toContain('answer 11');
     expect(reply).not.toContain('thread-alpha-secret');
@@ -268,7 +270,12 @@ describe('agent-aware resume commands', () => {
     expect(reply).not.toContain('new question');
 
     h.codexTranscripts.set('thread-alpha-secret', [
-      { status: 'completed', user: 'new question', assistant: 'final answer' },
+      {
+        status: 'completed',
+        user: 'new question',
+        assistant: 'progress before final\n\nfinal answer',
+        finalAssistant: 'final answer',
+      },
     ]);
     await vi.waitFor(() => {
       const updates = JSON.stringify(h.channel.rawClient.requests);
@@ -354,7 +361,8 @@ describe('agent-aware resume commands', () => {
         status: 'completed',
         completedAtMs: 1_700_000_200_000,
         user: 'new question',
-        assistant: 'final answer',
+        assistant: 'progress before final\n\nfinal answer',
+        finalAssistant: 'final answer',
       },
     ]);
 

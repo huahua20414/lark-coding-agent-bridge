@@ -173,7 +173,8 @@ describe('Codex thread history provider', () => {
         status: 'completed',
         completedAtMs: 4000,
         user: 'second question',
-        assistant: 'second answer',
+        assistant: 'checking files\n\nsecond answer',
+        finalAssistant: 'second answer',
       },
     ]);
 
@@ -342,7 +343,26 @@ rl.on('line', (line) => {
                     clientId: null,
                     content: [{ type: 'text', text: 'second question', text_elements: [] }]
                   },
-                  { type: 'agentMessage', id: 'agent-2', text: 'second answer', phase: null, memoryCitation: null }
+                  {
+                    type: 'reasoning',
+                    id: 'reasoning-2',
+                    content: [],
+                    summary: [{ type: 'summary_text', text: 'hidden plan' }]
+                  },
+                  {
+                    type: 'agentMessage',
+                    id: 'agent-2a',
+                    text: 'checking files',
+                    phase: 'commentary',
+                    memoryCitation: null
+                  },
+                  {
+                    type: 'agentMessage',
+                    id: 'agent-2b',
+                    text: 'second answer',
+                    phase: 'final_answer',
+                    memoryCitation: null
+                  }
                 ],
                 itemsView: 'complete',
                 status: 'completed',

@@ -33,6 +33,7 @@ export interface CodexTranscriptTurn {
   completedAtMs?: number;
   user?: string;
   assistant?: string;
+  finalAssistant?: string;
 }
 
 export interface ListCodexThreadHistoryOptions {
@@ -399,6 +400,7 @@ function parseTranscriptTurn(input: unknown, maxMessageChars: number): CodexTran
   const items = Array.isArray(raw?.items) ? raw.items : [];
   const users: string[] = [];
   const assistants: string[] = [];
+  const finalAssistants: string[] = [];
   for (const itemInput of items) {
     const item = recordValue(itemInput);
     if (!item) continue;
@@ -406,8 +408,13 @@ function parseTranscriptTurn(input: unknown, maxMessageChars: number): CodexTran
       const text = userInputText(item.content);
       if (text) users.push(normalizeSessionPreview(text, maxMessageChars));
     } else if (item.type === 'agentMessage') {
+      const phase = stringValue(item.phase);
+      if (!isVisibleAgentMessagePhase(phase)) continue;
       const text = stringValue(item.text)?.trim();
-      if (text) assistants.push(normalizeSessionPreview(text, maxMessageChars));
+      if (!text) continue;
+      const preview = normalizeSessionPreview(text, maxMessageChars);
+      assistants.push(preview);
+      if (isFinalAgentMessagePhase(phase)) finalAssistants.push(preview);
     }
   }
   const completedAt = numberValue(raw?.completedAt);
@@ -419,7 +426,16 @@ function parseTranscriptTurn(input: unknown, maxMessageChars: number): CodexTran
     ...(completedAtMs !== undefined ? { completedAtMs } : {}),
     ...(users.length > 0 ? { user: users.join('\n\n') } : {}),
     ...(assistants.length > 0 ? { assistant: assistants.join('\n\n') } : {}),
+    ...(finalAssistants.length > 0 ? { finalAssistant: finalAssistants.join('\n\n') } : {}),
   };
+}
+
+function isVisibleAgentMessagePhase(phase: string | undefined): boolean {
+  return phase === undefined || phase === 'commentary' || isFinalAgentMessagePhase(phase);
+}
+
+function isFinalAgentMessagePhase(phase: string | undefined): boolean {
+  return phase === undefined || phase === 'final_answer' || phase === 'final';
 }
 
 function userInputText(input: unknown): string | undefined {

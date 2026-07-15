@@ -185,7 +185,7 @@ export class CodexCompletionMonitor {
       });
       return 0;
     }
-    const latest = item.turn.assistant ?? item.turn.user;
+    const latest = item.turn.finalAssistant;
     const detail = `Codex · ${item.thread.source}`;
     const card = codexCompletionResumeCard({
       preview: item.thread.name || item.thread.preview,
@@ -293,7 +293,7 @@ function completionKey(threadId: string, turn: CodexTranscriptTurn): string {
 
 function turnFingerprint(turn: CodexTranscriptTurn): string {
   return createHash('sha256')
-    .update(turn.assistant ?? '')
+    .update(turn.finalAssistant ?? turn.assistant ?? '')
     .update('\0')
     .update(turn.user ?? '')
     .digest('hex')

@@ -73,15 +73,19 @@ describe('Codex completion monitor', () => {
     currentTurn = turn({
       status: 'completed',
       completedAtMs: 1_784_111_111_000,
-      assistant: 'done',
+      assistant: 'checking files\n\nfinal answer',
+      finalAssistant: 'final answer',
     });
     await monitor.tick();
     expect(sends).toHaveLength(1);
+    expect(JSON.stringify(sends[0])).toContain('final answer');
+    expect(JSON.stringify(sends[0])).not.toContain('checking files');
 
     currentTurn = turn({
       status: 'completed',
       completedAtMs: 1_784_111_222_000,
-      assistant: 'done with edited timestamp',
+      assistant: 'checking files again\n\nfinal answer edited timestamp',
+      finalAssistant: 'final answer edited timestamp',
     });
     await monitor.tick();
     expect(sends).toHaveLength(1);
