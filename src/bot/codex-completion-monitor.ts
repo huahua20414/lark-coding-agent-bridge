@@ -1,4 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { LarkChannel } from '@larksuite/channel';
 import { codexCompletionResumeCard } from '../card/templates';
@@ -27,12 +28,26 @@ export interface CodexCompletionMonitorDeps {
 interface CompletionState {
   initialized: boolean;
   notified: string[];
+  observed: Record<string, ObservedThreadState>;
+}
+
+interface ObservedThreadState {
+  state: 'open' | 'completed';
+  updatedAtMs: number;
+  completedKey?: string;
 }
 
 interface CompletedThread {
   thread: CodexThreadHistoryEntry;
   turn: CodexTranscriptTurn;
   key: string;
+}
+
+interface ThreadObservation {
+  thread: CodexThreadHistoryEntry;
+  turn?: CodexTranscriptTurn;
+  state: ObservedThreadState;
+  completed?: CompletedThread;
 }
 
 export function startCodexCompletionMonitor(
@@ -52,10 +67,10 @@ export function startCodexCompletionMonitor(
   };
 }
 
-class CodexCompletionMonitor {
+export class CodexCompletionMonitor {
   private running = false;
   private stateLoaded = false;
-  private state: CompletionState = { initialized: false, notified: [] };
+  private state: CompletionState = { initialized: false, notified: [], observed: {} };
   private readonly statePath: string;
 
   constructor(private readonly deps: CodexCompletionMonitorDeps) {
@@ -91,32 +106,71 @@ class CodexCompletionMonitor {
         ? { inheritCodexHome: codex.inheritCodexHome }
         : {}),
     });
-    const completed: CompletedThread[] = [];
+    const observations: ThreadObservation[] = [];
     for (const thread of threads) {
       const turn = await readLastTurn(this.deps, thread.threadId);
-      if (!turn || !isCompletedTurn(turn)) continue;
-      completed.push({ thread, turn, key: completionKey(thread.threadId, turn) });
+      const completed =
+        turn && isCompletedTurn(turn)
+          ? { thread, turn, key: completionKey(thread.threadId, turn) }
+          : undefined;
+      observations.push({
+        thread,
+        ...(turn ? { turn } : {}),
+        state: {
+          state: completed ? 'completed' : 'open',
+          updatedAtMs: thread.updatedAtMs,
+          ...(completed ? { completedKey: completed.key } : {}),
+        },
+        ...(completed ? { completed } : {}),
+      });
     }
 
     if (!this.state.initialized) {
-      for (const item of completed) this.remember(item.key);
+      for (const item of observations) {
+        this.observe(item);
+        if (item.completed) this.remember(item.completed.key);
+      }
       this.state.initialized = true;
       await this.saveState();
       log.info('session', 'codex-completion-monitor-seeded', {
-        completed: completed.length,
+        completed: observations.filter((item) => item.completed).length,
+        scanned: threads.length,
+      });
+      return;
+    }
+
+    if (Object.keys(this.state.observed).length === 0 && observations.length > 0) {
+      for (const item of observations) this.observe(item);
+      await this.saveState();
+      log.info('session', 'codex-completion-monitor-observed-migrated', {
         scanned: threads.length,
       });
       return;
     }
 
     let changed = false;
-    for (const item of completed) {
-      if (this.state.notified.includes(item.key)) continue;
-      const sent = await this.notify(item);
-      this.remember(item.key);
+    for (const item of observations) {
+      const previous = this.state.observed[item.thread.threadId];
+      this.observe(item);
+      if (!previous || !item.completed) {
+        changed = true;
+        continue;
+      }
+      if (previous.state !== 'open') {
+        changed = true;
+        continue;
+      }
+      const previousKey = previous.completedKey;
+      const isNewCompletion = item.completed.key !== previousKey;
+      if (!isNewCompletion || this.state.notified.includes(item.completed.key)) {
+        changed = true;
+        continue;
+      }
+      const sent = await this.notify(item.completed);
+      this.remember(item.completed.key);
       changed = true;
       log.info('session', 'codex-completion-monitor-notified', {
-        threadId: item.thread.threadId,
+        threadId: item.completed.thread.threadId,
         sent,
       });
     }
@@ -171,6 +225,10 @@ class CodexCompletionMonitor {
     this.state.notified = this.state.notified.slice(-MAX_NOTIFIED_KEYS);
   }
 
+  private observe(item: ThreadObservation): void {
+    this.state.observed[item.thread.threadId] = item.state;
+  }
+
   private async loadState(): Promise<void> {
     if (this.stateLoaded) return;
     this.stateLoaded = true;
@@ -183,6 +241,7 @@ class CodexCompletionMonitor {
         notified: Array.isArray(parsed.notified)
           ? parsed.notified.filter((item): item is string => typeof item === 'string')
           : [],
+        observed: normalizeObserved(parsed.observed),
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -228,7 +287,34 @@ function isCompletedTurn(turn: CodexTranscriptTurn): boolean {
 }
 
 function completionKey(threadId: string, turn: CodexTranscriptTurn): string {
-  return `${threadId}:${turn.completedAtMs ?? turn.status ?? 'completed'}`;
+  const marker = turn.completedAtMs ?? `${turn.status ?? 'completed'}:${turnFingerprint(turn)}`;
+  return `${threadId}:${marker}`;
+}
+
+function turnFingerprint(turn: CodexTranscriptTurn): string {
+  return createHash('sha256')
+    .update(turn.assistant ?? '')
+    .update('\0')
+    .update(turn.user ?? '')
+    .digest('hex')
+    .slice(0, 16);
+}
+
+function normalizeObserved(input: unknown): Record<string, ObservedThreadState> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const out: Record<string, ObservedThreadState> = {};
+  for (const [threadId, value] of Object.entries(input)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const raw = value as Partial<ObservedThreadState>;
+    if (raw.state !== 'open' && raw.state !== 'completed') continue;
+    if (typeof raw.updatedAtMs !== 'number') continue;
+    out[threadId] = {
+      state: raw.state,
+      updatedAtMs: raw.updatedAtMs,
+      ...(typeof raw.completedKey === 'string' ? { completedKey: raw.completedKey } : {}),
+    };
+  }
+  return out;
 }
 
 function formatCompletionFallback(
