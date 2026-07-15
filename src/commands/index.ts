@@ -24,7 +24,13 @@ import {
 import { GROUP_MSG_SCOPE, hasGroupMsgScope } from '../bot/app-scope';
 import { requestScopeGrantLink } from '../bot/wizard';
 import { forgetManagedCard, sendManagedCard, updateManagedCard } from '../card/managed';
-import { helpCard, resumeCard, statusCard, workspacesCard } from '../card/templates';
+import {
+  codexResumeProgressCard,
+  helpCard,
+  resumeCard,
+  statusCard,
+  workspacesCard,
+} from '../card/templates';
 import type { AppConfig, AppPreferences, MessageReplyMode, TenantBrand } from '../config/schema';
 import {
   getAgentStopGraceMs,
@@ -148,7 +154,6 @@ export interface CommandContext {
   codexResumeWatch?: {
     pollIntervalMs?: number;
     timeoutMs?: number;
-    maxProgressMessages?: number;
   };
   claudeHistoryProvider?: (cwd: string, limit: number) => Promise<SessionSummary[]>;
   /** Set when invoked from a CardKit 2.0 form submit. Keys are input `name`s. */
@@ -173,8 +178,7 @@ interface ResumeCandidate {
 
 const RESUME_CANDIDATE_TTL_MS = 10 * 60 * 1000;
 const CODEX_RESUME_WATCH_TIMEOUT_MS = 20 * 60 * 1000;
-const CODEX_RESUME_WATCH_POLL_MS = 10_000;
-const CODEX_RESUME_WATCH_MAX_PROGRESS_MESSAGES = 3;
+const CODEX_RESUME_WATCH_POLL_MS = 5000;
 const resumeCandidates = new Map<string, ResumeCandidate>();
 const codexResumeWatchers = new Map<string, { cancel(): void }>();
 const AUDIT_SAFE_COMMAND_REPLY = '命令已处理。';
@@ -637,9 +641,10 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
           threadId: resolved.threadId!,
         });
         const snapshot = await readCodexResumeSnapshot(ctx, resolved.threadId!);
-        await reply(ctx, formatCodexResumeAppliedReply(snapshot));
         if (snapshot?.hasInProgress) {
-          startCodexResumeWatcher(ctx, resolved.threadId!, fingerprintCodexResumeMessage(snapshot.message));
+          await startCodexResumeWatcher(ctx, resolved.threadId!, snapshot);
+        } else {
+          await reply(ctx, formatCodexResumeAppliedReply(snapshot));
         }
         return;
       } else {
@@ -702,6 +707,7 @@ async function readCodexResumeSnapshot(
       threadId,
       profileStateDir: commandProfilePaths(ctx).profileDir,
       maxTurns: 20,
+      maxMessageChars: 4000,
       ...(codex.codexHome ? { codexHome: codex.codexHome } : {}),
       ...(codex.inheritCodexHome !== undefined
         ? { inheritCodexHome: codex.inheritCodexHome }
@@ -782,25 +788,45 @@ function quoteMarkdown(text: string): string {
     .join('\n');
 }
 
-function startCodexResumeWatcher(
+async function startCodexResumeWatcher(
   ctx: CommandContext,
   threadId: string,
-  initialFingerprint: string | undefined,
-): void {
+  initialSnapshot: CodexResumeSnapshot,
+): Promise<void> {
   const key = codexResumeWatcherKey(ctx);
   codexResumeWatchers.get(key)?.cancel();
 
   let cancelled = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let lastFingerprint = initialFingerprint;
-  let progressMessages = 0;
+  let lastMessage = initialSnapshot.message;
+  let lastFingerprint = fingerprintCodexResumeMessage(lastMessage);
+  const cardLines = [RESUME_APPLIED_REPLY];
+  if (lastMessage) cardLines.push('', formatCodexResumeMessage(lastMessage));
   const startedAt = Date.now();
   const watchConfig = codexResumeWatchConfig(ctx);
+  let progressMessageId: string;
 
   const cancel = (): void => {
     cancelled = true;
     if (timer) clearTimeout(timer);
   };
+
+  try {
+    const sent = await sendManagedCard(
+      ctx.channel,
+      ctx.msg.chatId,
+      codexResumeProgressCard(cardLines.join('\n')),
+      commandReplyOptions(ctx),
+    );
+    progressMessageId = sent.messageId;
+  } catch (err) {
+    log.warn('session', 'codex-resume-watch-card-send-failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    await reply(ctx, formatCodexResumeAppliedReply(initialSnapshot));
+    return;
+  }
+
   codexResumeWatchers.set(key, { cancel });
 
   const schedule = (): void => {
@@ -814,7 +840,8 @@ function startCodexResumeWatcher(
     if (cancelled) return;
     if (Date.now() - startedAt >= watchConfig.timeoutMs) {
       codexResumeWatchers.delete(key);
-      await reply(ctx, 'Codex 任务跟踪已停止：超过 20 分钟。');
+      cardLines.push('', 'Codex 任务跟踪已停止：超过 20 分钟。');
+      await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
       return;
     }
 
@@ -832,12 +859,12 @@ function startCodexResumeWatcher(
       const fingerprint = fingerprintCodexResumeMessage(message);
       if (fingerprint && fingerprint !== lastFingerprint) {
         lastFingerprint = fingerprint;
-        if (!snapshot.hasInProgress || progressMessages < watchConfig.maxProgressMessages) {
-          if (snapshot.hasInProgress) progressMessages += 1;
-          await reply(ctx, formatCodexResumeMessage(message));
-        }
+        const appended = appendCodexResumeMessage(cardLines, lastMessage, message);
+        lastMessage = message;
+        if (appended) await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
       } else if (!snapshot.hasInProgress && lastFingerprint) {
-        await reply(ctx, 'Codex 任务已完成。');
+        cardLines.push('', 'Codex 任务已完成。');
+        await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
       }
     }
 
@@ -849,6 +876,39 @@ function startCodexResumeWatcher(
   };
 
   schedule();
+}
+
+async function updateCodexResumeProgressCard(
+  ctx: CommandContext,
+  messageId: string,
+  lines: string[],
+): Promise<void> {
+  try {
+    await updateManagedCard(ctx.channel, messageId, codexResumeProgressCard(lines.join('\n')));
+  } catch (err) {
+    log.warn('session', 'codex-resume-watch-card-update-failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+function appendCodexResumeMessage(
+  lines: string[],
+  previous: CodexResumeMessage | undefined,
+  next: CodexResumeMessage,
+): boolean {
+  const delta =
+    previous &&
+    previous.role === next.role &&
+    next.text.startsWith(previous.text)
+      ? next.text.slice(previous.text.length).trim()
+      : undefined;
+  if (delta) {
+    lines.push('', `**${next.label} · ${next.role}**`, quoteMarkdown(delta));
+    return true;
+  }
+  lines.push('', formatCodexResumeMessage(next));
+  return true;
 }
 
 function codexResumeWatcherKey(ctx: CommandContext): string {
@@ -866,14 +926,11 @@ function cancelCodexResumeWatcher(ctx: CommandContext): void {
 function codexResumeWatchConfig(ctx: CommandContext): {
   pollIntervalMs: number;
   timeoutMs: number;
-  maxProgressMessages: number;
 } {
   const overrides = ctx.codexResumeWatch;
   return {
     pollIntervalMs: overrides?.pollIntervalMs ?? CODEX_RESUME_WATCH_POLL_MS,
     timeoutMs: overrides?.timeoutMs ?? CODEX_RESUME_WATCH_TIMEOUT_MS,
-    maxProgressMessages:
-      overrides?.maxProgressMessages ?? CODEX_RESUME_WATCH_MAX_PROGRESS_MESSAGES,
   };
 }
 

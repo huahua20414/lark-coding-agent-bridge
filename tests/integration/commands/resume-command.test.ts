@@ -247,7 +247,7 @@ describe('agent-aware resume commands', () => {
     const [nonce] = resumeArgsFromCard(lastContent(h.channel));
     await expect(h.run(`/resume use ${nonce}`)).resolves.toBe(true);
 
-    const reply = lastMarkdown(h.channel);
+    const reply = lastContentString(h.channel);
     expect(reply).toContain('正在进行的消息');
     expect(reply).toContain('partial answer');
     expect(reply).not.toContain('old answer');
@@ -257,8 +257,9 @@ describe('agent-aware resume commands', () => {
       { status: 'completed', user: 'new question', assistant: 'final answer' },
     ]);
     await vi.waitFor(() => {
-      expect(lastMarkdown(h.channel)).toContain('任务已完成');
-      expect(lastMarkdown(h.channel)).toContain('final answer');
+      const updates = JSON.stringify(h.channel.rawClient.requests);
+      expect(updates).toContain('任务已完成');
+      expect(updates).toContain('final answer');
     });
   });
 

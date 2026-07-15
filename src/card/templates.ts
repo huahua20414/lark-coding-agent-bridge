@@ -177,6 +177,10 @@ export function resumeCard(cwd: string, entries: ResumeEntry[]): object {
   return shell('🔁 恢复历史会话', elements);
 }
 
+export function codexResumeProgressCard(markdown: string): object {
+  return shell('Codex 任务跟踪', [divMd(markdown)]);
+}
+
 export function helpCard(agentName = 'Agent'): object {
   const escapedAgentName = escapeMd(agentName);
   return shell('💡 使用帮助', [

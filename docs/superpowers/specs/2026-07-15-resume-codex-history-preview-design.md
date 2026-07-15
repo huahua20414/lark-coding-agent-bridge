@@ -12,7 +12,7 @@ follow an in-progress turn until it completes.
 - Private chats only; group and topic chats keep the existing non-disclosing behavior.
 - Show one message only.
 - Prefer the message from an in-progress turn; otherwise show the latest user or assistant message.
-- If the resumed thread is in progress, poll it every 2 seconds until it completes.
+- If the resumed thread is in progress, poll it every 5 seconds until it completes.
 - Stop polling after 20 minutes.
 - Resume must still succeed if history preview loading fails.
 
@@ -28,8 +28,9 @@ follow an in-progress turn until it completes.
   - a single "ongoing message" or "latest message" section when transcript items are available.
 - Start a scope-level watcher only when a resumed thread has an in-progress turn.
 - The watcher replaces any previous watcher for the same Feishu scope.
-- The watcher sends a progress update only when the selected message content changes, and sends a
-  final completion update when the in-progress turn finishes.
+- The watcher sends a managed CardKit card and updates that same message in place.
+- The watcher appends progress to the same card only when the selected message content changes, and
+  appends a final completion update when the in-progress turn finishes.
 
 ## Error Handling
 

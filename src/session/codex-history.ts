@@ -54,6 +54,7 @@ export interface ReadCodexThreadTranscriptOptions {
   inheritCodexHome?: boolean;
   timeoutMs?: number;
   maxTurns?: number;
+  maxMessageChars?: number;
 }
 
 export type CodexHistoryErrorCode =
@@ -252,7 +253,10 @@ export async function readCodexThreadTranscript(
         cleanup({ kill: true });
         return;
       }
-      const parsed = parseThreadReadResponse(response.result, options.maxTurns ?? 10);
+      const parsed = parseThreadReadResponse(response.result, {
+        maxTurns: options.maxTurns ?? 10,
+        maxMessageChars: options.maxMessageChars ?? 4000,
+      });
       if (!parsed.ok) {
         reject(parsed.error);
         cleanup({ kill: true });
@@ -370,7 +374,7 @@ function parseThreadListResponse(
 
 function parseThreadReadResponse(
   input: unknown,
-  maxTurns: number,
+  options: { maxTurns: number; maxMessageChars: number },
 ): { ok: true; turns: CodexTranscriptTurn[] } | { ok: false; error: CodexHistoryError } {
   const raw = recordValue(input);
   const thread = recordValue(raw?.thread);
@@ -383,11 +387,13 @@ function parseThreadReadResponse(
   }
   return {
     ok: true,
-    turns: turns.map(parseTranscriptTurn).slice(-Math.max(0, maxTurns)),
+    turns: turns
+      .map((turn) => parseTranscriptTurn(turn, options.maxMessageChars))
+      .slice(-Math.max(0, options.maxTurns)),
   };
 }
 
-function parseTranscriptTurn(input: unknown): CodexTranscriptTurn {
+function parseTranscriptTurn(input: unknown, maxMessageChars: number): CodexTranscriptTurn {
   const raw = recordValue(input);
   const items = Array.isArray(raw?.items) ? raw.items : [];
   const users: string[] = [];
@@ -397,10 +403,10 @@ function parseTranscriptTurn(input: unknown): CodexTranscriptTurn {
     if (!item) continue;
     if (item.type === 'userMessage') {
       const text = userInputText(item.content);
-      if (text) users.push(normalizeSessionPreview(text, 500));
+      if (text) users.push(normalizeSessionPreview(text, maxMessageChars));
     } else if (item.type === 'agentMessage') {
       const text = stringValue(item.text)?.trim();
-      if (text) assistants.push(normalizeSessionPreview(text, 500));
+      if (text) assistants.push(normalizeSessionPreview(text, maxMessageChars));
     }
   }
   return {
