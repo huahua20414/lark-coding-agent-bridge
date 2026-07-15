@@ -16,6 +16,7 @@ import {
 export type AgentKind = 'claude' | 'codex';
 export type SandboxMode = CodexSandboxMode;
 export type { AccessMode, PermissionConfig, PermissionSource };
+export type CodexTransport = 'exec' | 'app-server';
 
 export interface ProfileAccess {
   allowedUsers: string[];
@@ -33,6 +34,7 @@ export interface SandboxConfig {
 
 export interface CodexConfig {
   binaryPath: string;
+  transport?: CodexTransport;
   realpath?: string;
   version?: string;
   sha256?: string;
@@ -306,6 +308,7 @@ function normalizeWorkspaces(input: {
 function normalizeCodex(input: CodexConfig & { flags?: unknown }): CodexConfig {
   const codex: CodexConfig = {
     binaryPath: input.binaryPath,
+    transport: input.transport === 'app-server' ? 'app-server' : 'exec',
     ...(typeof input.realpath === 'string' ? { realpath: input.realpath } : {}),
     ...(typeof input.version === 'string' ? { version: input.version } : {}),
     ...(typeof input.sha256 === 'string' ? { sha256: input.sha256 } : {}),

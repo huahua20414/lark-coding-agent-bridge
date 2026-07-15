@@ -16,11 +16,15 @@ import type {
   AgentRunOptions,
 } from '../types';
 import { buildCodexArgs } from './argv';
+import { runCodexAppServer } from './app-server';
 import { CodexJsonlTranslator, type CodexFinishReason } from './jsonl';
+
+export type CodexTransport = 'exec' | 'app-server';
 
 export interface CodexAdapterOptions {
   binary: string;
   profileStateDir: string;
+  transport?: CodexTransport;
   codexHome?: string;
   inheritCodexHome?: boolean;
   ignoreUserConfig?: boolean;
@@ -38,6 +42,7 @@ export class CodexAdapter implements AgentAdapter {
 
   private readonly binary: string;
   private readonly profileStateDir: string;
+  private readonly transport: CodexTransport;
   private readonly codexHome: string | undefined;
   private readonly inheritCodexHome: boolean;
   private readonly ignoreUserConfig: boolean;
@@ -50,6 +55,7 @@ export class CodexAdapter implements AgentAdapter {
   constructor(opts: CodexAdapterOptions) {
     this.binary = opts.binary;
     this.profileStateDir = opts.profileStateDir;
+    this.transport = opts.transport ?? 'exec';
     this.codexHome = opts.codexHome;
     this.inheritCodexHome = opts.inheritCodexHome !== false;
     this.ignoreUserConfig = opts.ignoreUserConfig === true;
@@ -93,24 +99,44 @@ export class CodexAdapter implements AgentAdapter {
       throw new Error('cwd is required for CodexAdapter.run');
     }
 
-    const args = buildCodexArgs({
-      cwd: opts.cwd,
-      sandbox: opts.sandbox ?? this.sandbox,
-      threadId: opts.threadId,
-      images: opts.images,
-      ignoreUserConfig: this.ignoreUserConfig,
-      ignoreRules: this.ignoreRules,
-      model: opts.model,
-    });
     const envOverrides: NodeJS.ProcessEnv = buildLarkChannelEnv(this.larkChannel);
     if (this.codexHome) {
       envOverrides.CODEX_HOME = this.codexHome;
     } else if (!this.inheritCodexHome) {
       envOverrides.CODEX_HOME = join(this.profileStateDir, 'codex-home');
     }
+    const env = mergeProcessEnv(process.env, envOverrides);
+    const prompt = prefixBridgeSystemPrompt(opts.prompt, this.botIdentity);
+    const sandbox = opts.sandbox ?? this.sandbox;
+    const stopGraceMs = opts.stopGraceMs ?? this.defaultStopGraceMs;
+
+    if (this.transport === 'app-server') {
+      return runCodexAppServer({
+        binary: this.binary,
+        runId: opts.runId,
+        prompt,
+        cwd: opts.cwd,
+        sandbox,
+        env,
+        threadId: opts.threadId,
+        images: opts.images,
+        model: opts.model,
+        stopGraceMs,
+      });
+    }
+
+    const args = buildCodexArgs({
+      cwd: opts.cwd,
+      sandbox,
+      threadId: opts.threadId,
+      images: opts.images,
+      ignoreUserConfig: this.ignoreUserConfig,
+      ignoreRules: this.ignoreRules,
+      model: opts.model,
+    });
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
-      env: mergeProcessEnv(process.env, envOverrides),
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as CodexChild;
 
@@ -153,9 +179,7 @@ export class CodexAdapter implements AgentAdapter {
     child.stdin.on('error', (err) => {
       log.warn('agent', 'stdin-error', { message: err.message });
     });
-    child.stdin.end(prefixBridgeSystemPrompt(opts.prompt, this.botIdentity), 'utf8');
-
-    const stopGraceMs = opts.stopGraceMs ?? this.defaultStopGraceMs;
+    child.stdin.end(prompt, 'utf8');
 
     return {
       runId: opts.runId,

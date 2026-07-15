@@ -147,6 +147,76 @@ describe('CodexAdapter process contract', () => {
     expect(record.env.CODEX_HOME).toBeUndefined();
   });
 
+  it('can run Codex through app-server stdio and translate notifications', async () => {
+    process.env.CODEX_HOME = '/outer/codex-home';
+    const fake = await createFakeCodexAppServer();
+    cleanup.push(fake.dir);
+    const cwd = await realpath(fake.dir);
+
+    const run = new CodexAdapter({
+      binary: fake.path,
+      profileStateDir: fake.dir,
+      sandbox: 'workspace-write',
+      transport: 'app-server',
+    }).run({
+      runId: 'run-app-server',
+      prompt: 'hello from lark',
+      cwd,
+      images: [join(fake.dir, 'image.png')],
+    });
+
+    expect(await collect(run.events)).toEqual([
+      { type: 'system', threadId: 'thread-app' },
+      {
+        type: 'tool_use',
+        id: 'cmd-1',
+        name: 'command_execution',
+        input: { command: 'pwd' },
+      },
+      { type: 'tool_result', id: 'cmd-1', output: cwd, isError: false },
+      { type: 'text', delta: 'hello ' },
+      { type: 'text', delta: 'app' },
+      { type: 'done', threadId: 'thread-app', terminationReason: 'normal' },
+    ]);
+
+    const record = await readAppServerRecord(fake.recordPath);
+    expect(record.argv).toEqual(['app-server', '--listen', 'stdio://']);
+    expect(await realpath(record.cwd)).toBe(cwd);
+    expect(record.env.CODEX_HOME).toBe('/outer/codex-home');
+    expect(record.messages.map((msg) => msg.method)).toEqual([
+      'initialize',
+      'initialized',
+      'thread/start',
+      'turn/start',
+    ]);
+    const threadStart = record.messages.find((msg) => msg.method === 'thread/start');
+    expect(threadStart?.params).toMatchObject({
+      cwd,
+      runtimeWorkspaceRoots: [cwd],
+      approvalPolicy: 'never',
+      sandbox: 'workspace-write',
+      threadSource: 'lark-channel-bridge',
+      config: {
+        shell_environment_policy: {
+          inherit: 'all',
+        },
+      },
+    });
+    const turnStart = record.messages.find((msg) => msg.method === 'turn/start');
+    expect(turnStart?.params).toMatchObject({
+      threadId: 'thread-app',
+      cwd,
+      approvalPolicy: 'never',
+      sandboxPolicy: {
+        type: 'workspaceWrite',
+        writableRoots: [cwd],
+      },
+    });
+    expect(JSON.stringify(turnStart?.params)).toContain('lark-channel-bridge 运行约定');
+    expect(JSON.stringify(turnStart?.params)).toContain('hello from lark');
+    expect(JSON.stringify(turnStart?.params)).toContain('localImage');
+  });
+
   it('passes image paths and resume thread through the Codex argv contract', async () => {
     const fake = await createFakeCodex({
       lines: [{ type: 'turn.completed' }],
@@ -469,6 +539,62 @@ async function createFakeCodex(options: {
   return { path, dir, recordPath };
 }
 
+async function createFakeCodexAppServer(): Promise<FakeBinary> {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-app-server-test-'));
+  const path = join(dir, 'fake-codex-app-server.mjs');
+  const recordPath = join(dir, 'app-server.json');
+  await writeFile(
+    path,
+    [
+      '#!/usr/bin/env node',
+      'import { createInterface } from "node:readline";',
+      'import { writeFileSync } from "node:fs";',
+      `const recordPath = ${JSON.stringify(recordPath)};`,
+      'const messages = [];',
+      'const record = () => writeFileSync(recordPath, JSON.stringify({',
+      '  argv: process.argv.slice(2),',
+      '  cwd: process.cwd(),',
+      '  messages,',
+      '  env: { CODEX_HOME: process.env.CODEX_HOME, LARK_CHANNEL: process.env.LARK_CHANNEL },',
+      '}));',
+      'process.on("SIGTERM", () => { record(); process.exit(0); });',
+      'const send = (msg) => console.log(JSON.stringify(msg));',
+      'const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });',
+      'rl.on("line", (line) => {',
+      '  const msg = JSON.parse(line);',
+      '  messages.push(msg);',
+      '  record();',
+      '  if (msg.method === "initialize") {',
+      '    send({ id: msg.id, result: { userAgent: "fake", platformFamily: "macos", platformOs: "darwin" } });',
+      '    return;',
+      '  }',
+      '  if (msg.method === "thread/start") {',
+      '    send({ id: msg.id, result: { thread: { id: "thread-app" } } });',
+      '    return;',
+      '  }',
+      '  if (msg.method === "thread/resume") {',
+      '    send({ id: msg.id, result: { thread: { id: msg.params.threadId } } });',
+      '    return;',
+      '  }',
+      '  if (msg.method === "turn/start") {',
+      '    const threadId = msg.params.threadId;',
+      '    send({ id: msg.id, result: { turn: { id: "turn-app" } } });',
+      '    send({ method: "turn/started", params: { threadId, turn: { id: "turn-app", items: [], itemsView: "complete", status: "inProgress", error: null, startedAt: 1, completedAt: null, durationMs: null } } });',
+      '    send({ method: "item/started", params: { threadId, turnId: "turn-app", item: { type: "commandExecution", id: "cmd-1", command: "pwd", cwd: process.cwd(), processId: null, source: "exec", status: "inProgress", commandActions: [], aggregatedOutput: null, exitCode: null, durationMs: null }, startedAtMs: 1 } });',
+      '    send({ method: "item/completed", params: { threadId, turnId: "turn-app", item: { type: "commandExecution", id: "cmd-1", command: "pwd", cwd: process.cwd(), processId: null, source: "exec", status: "completed", commandActions: [], aggregatedOutput: process.cwd(), exitCode: 0, durationMs: 1 }, completedAtMs: 2 } });',
+      '    send({ method: "item/agentMessage/delta", params: { threadId, turnId: "turn-app", itemId: "msg-1", delta: "hello " } });',
+      '    send({ method: "item/agentMessage/delta", params: { threadId, turnId: "turn-app", itemId: "msg-1", delta: "app" } });',
+      '    send({ method: "turn/completed", params: { threadId, turn: { id: "turn-app", items: [], itemsView: "complete", status: "completed", error: null, startedAt: 1, completedAt: 2, durationMs: 1 } } });',
+      '  }',
+      '});',
+      'record();',
+    ].join('\n'),
+    'utf8',
+  );
+  await chmod(path, 0o755);
+  return { path, dir, recordPath };
+}
+
 async function readRecord(path: string): Promise<{
   argv: string[];
   cwd: string;
@@ -497,6 +623,26 @@ async function readRecord(path: string): Promise<{
       CODEX_HOME?: string;
       APP_SECRET?: string;
       PATH?: string;
+    };
+  };
+}
+
+async function readAppServerRecord(path: string): Promise<{
+  argv: string[];
+  cwd: string;
+  messages: Array<{ method: string; params?: Record<string, unknown> }>;
+  env: {
+    CODEX_HOME?: string;
+    LARK_CHANNEL?: string;
+  };
+}> {
+  return JSON.parse(await readFile(path, 'utf8')) as {
+    argv: string[];
+    cwd: string;
+    messages: Array<{ method: string; params?: Record<string, unknown> }>;
+    env: {
+      CODEX_HOME?: string;
+      LARK_CHANNEL?: string;
     };
   };
 }

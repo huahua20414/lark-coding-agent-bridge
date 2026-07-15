@@ -306,8 +306,23 @@ describe('profile schema', () => {
       inheritCodexHome: true,
       ignoreUserConfig: false,
       ignoreRules: true,
+      transport: 'exec',
     });
     expect(cfg.codex).not.toHaveProperty('flags');
+  });
+
+  it('accepts app-server as a Codex transport override', () => {
+    const cfg = normalizeProfileConfig({
+      schemaVersion: 2,
+      agentKind: 'codex',
+      accounts: { app },
+      codex: {
+        binaryPath: '/usr/local/bin/codex',
+        transport: 'app-server',
+      },
+    });
+
+    expect(cfg.codex?.transport).toBe('app-server');
   });
 
   it('preserves explicit Codex home isolation when configured', () => {
