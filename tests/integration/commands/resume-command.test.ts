@@ -212,6 +212,19 @@ describe('agent-aware resume commands', () => {
     expect(lastMarkdown(h.channel)).toContain('已完成');
   });
 
+  it('falls back to text when the resume card send times out', async () => {
+    const h = await createHarness('codex');
+    h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
+    vi.spyOn(h.channel, 'send').mockRejectedValueOnce(new Error('read ETIMEDOUT'));
+
+    await expect(h.run('/resume')).resolves.toBe(true);
+
+    const fallback = lastMarkdown(h.channel);
+    expect(fallback).toContain('卡片发送超时');
+    expect(fallback).toContain('alpha prompt');
+    expect(fallback).toMatch(/\/resume use [a-f0-9-]+/);
+  });
+
   it('shows only the latest Codex transcript message after resuming a history selection', async () => {
     const h = await createHarness('codex');
     h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));

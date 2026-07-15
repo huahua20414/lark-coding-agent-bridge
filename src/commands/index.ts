@@ -29,6 +29,7 @@ import {
   helpCard,
   resumeCard,
   statusCard,
+  type ResumeEntry,
   workspacesCard,
 } from '../card/templates';
 import type { AppConfig, AppPreferences, MessageReplyMode, TenantBrand } from '../config/schema';
@@ -84,6 +85,7 @@ import {
   type ReadCodexThreadTranscriptOptions,
 } from '../session/codex-history';
 import type { SessionCatalog, SessionCatalogIdentity } from '../session/catalog';
+import { normalizeSessionPreview } from '../session/preview';
 import { isAlive, readAndPrune, resolveTarget } from '../runtime/registry';
 import type { SessionStore } from '../session/store';
 import { resolveWorkingDirectory } from '../policy/workspace';
@@ -592,8 +594,7 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
           current: thread.threadId === entry?.threadId,
         };
       });
-      const card = resumeCard(cwd, entries);
-      await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+      await sendResumeList(ctx, cwd, entries);
       return;
     }
     if (entry?.threadId && identity) {
@@ -604,8 +605,7 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
       );
       return;
     }
-    const card = resumeCard(cwd, []);
-    await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+    await sendResumeList(ctx, cwd, []);
     return;
   }
 
@@ -622,8 +622,45 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
     lineCount: s.lineCount,
     current: s.sessionId === currentSession?.sessionId,
   }));
+  await sendResumeList(ctx, cwd, entries);
+}
+
+async function sendResumeList(
+  ctx: CommandContext,
+  cwd: string,
+  entries: ResumeEntry[],
+): Promise<void> {
   const card = resumeCard(cwd, entries);
-  await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+  try {
+    await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+  } catch (err) {
+    log.warn('command', 'resume-card-send-failed', {
+      message: err instanceof Error ? err.message : String(err),
+      entries: entries.length,
+    });
+    await reply(ctx, formatResumeListFallback(cwd, entries));
+  }
+}
+
+function formatResumeListFallback(cwd: string, entries: ResumeEntry[]): string {
+  const lines = ['恢复历史会话', `当前 cwd：${cwd}`];
+  if (entries.length === 0) {
+    lines.push('', '此 cwd 下没有历史会话。');
+    return lines.join('\n');
+  }
+  lines.push('', '卡片发送超时，先用文本方式列出：');
+  entries.forEach((entry, index) => {
+    const preview = normalizeSessionPreview(entry.preview, 80) || '(空会话)';
+    const detail = entry.detail ?? `${entry.lineCount ?? 0} 条`;
+    const current = entry.current ? ' ← 当前' : '';
+    lines.push(
+      '',
+      `${index + 1}. ${preview}${current}`,
+      `${entry.relTime} · ${detail}`,
+      `/resume use ${entry.sessionId}`,
+    );
+  });
+  return lines.join('\n');
 }
 
 async function applyResume(sessionId: string, ctx: CommandContext): Promise<void> {
