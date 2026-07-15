@@ -735,10 +735,11 @@ interface CodexResumeMessage {
   label: '正在进行的消息' | '最新消息' | '任务进度更新' | '任务已完成';
   role: '用户' | 'Codex';
   text: string;
+  status?: string;
 }
 
 function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMessage | undefined {
-  const ongoing = [...turns].reverse().find((turn) => turn.status === 'inProgress');
+  const ongoing = [...turns].reverse().find((turn) => isCodexResumeWatchableStatus(turn.status));
   if (ongoing) {
     const text = ongoing.assistant ?? ongoing.user;
     if (text) {
@@ -746,18 +747,42 @@ function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMess
         label: '正在进行的消息',
         role: ongoing.assistant ? 'Codex' : '用户',
         text,
+        ...(ongoing.status ? { status: ongoing.status } : {}),
       };
     }
   }
   for (const turn of [...turns].reverse()) {
-    if (turn.assistant) return { label: '最新消息', role: 'Codex', text: turn.assistant };
-    if (turn.user) return { label: '最新消息', role: '用户', text: turn.user };
+    if (turn.assistant) {
+      return {
+        label: '最新消息',
+        role: 'Codex',
+        text: turn.assistant,
+        ...(turn.status ? { status: turn.status } : {}),
+      };
+    }
+    if (turn.user) {
+      return {
+        label: '最新消息',
+        role: '用户',
+        text: turn.user,
+        ...(turn.status ? { status: turn.status } : {}),
+      };
+    }
   }
   return undefined;
 }
 
 function hasInProgressTurn(turns: CodexTranscriptTurn[]): boolean {
-  return turns.some((turn) => turn.status === 'inProgress');
+  return turns.some((turn) => isCodexResumeWatchableStatus(turn.status));
+}
+
+function isCodexResumeWatchableStatus(status: string | undefined): boolean {
+  return (
+    status === 'inProgress' ||
+    status === 'in_progress' ||
+    status === 'running' ||
+    status === 'interrupted'
+  );
 }
 
 function formatCodexResumeAppliedReply(snapshot: CodexResumeSnapshot | undefined): string {
@@ -819,6 +844,13 @@ async function startCodexResumeWatcher(
       commandReplyOptions(ctx),
     );
     progressMessageId = sent.messageId;
+    log.info('session', 'codex-resume-watch-started', {
+      threadId,
+      pollIntervalMs: watchConfig.pollIntervalMs,
+      timeoutMs: watchConfig.timeoutMs,
+      initialStatus: lastMessage?.status,
+      hasInitialMessage: Boolean(lastMessage),
+    });
   } catch (err) {
     log.warn('session', 'codex-resume-watch-card-send-failed', {
       message: err instanceof Error ? err.message : String(err),
@@ -842,15 +874,18 @@ async function startCodexResumeWatcher(
       codexResumeWatchers.delete(key);
       cardLines.push('', 'Codex 任务跟踪已停止：超过 20 分钟。');
       await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
+      log.info('session', 'codex-resume-watch-timeout', { threadId });
       return;
     }
 
     const snapshot = await readCodexResumeSnapshot(ctx, threadId);
     if (cancelled) return;
     if (snapshot?.historyFailed) {
+      log.warn('session', 'codex-resume-watch-read-failed', { threadId });
       schedule();
       return;
     }
+    let changed = false;
     if (snapshot?.message) {
       const message = {
         ...snapshot.message,
@@ -861,15 +896,30 @@ async function startCodexResumeWatcher(
         lastFingerprint = fingerprint;
         const appended = appendCodexResumeMessage(cardLines, lastMessage, message);
         lastMessage = message;
-        if (appended) await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
+        if (appended) {
+          changed = true;
+          await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
+        }
       } else if (!snapshot.hasInProgress && lastFingerprint) {
         cardLines.push('', 'Codex 任务已完成。');
+        changed = true;
         await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
       }
     }
+    log.info('session', 'codex-resume-watch-tick', {
+      threadId,
+      status: snapshot?.message?.status,
+      hasInProgress: snapshot?.hasInProgress === true,
+      hasMessage: Boolean(snapshot?.message),
+      changed,
+    });
 
     if (!snapshot?.hasInProgress) {
       codexResumeWatchers.delete(key);
+      log.info('session', 'codex-resume-watch-stopped', {
+        threadId,
+        status: snapshot?.message?.status,
+      });
       return;
     }
     schedule();
@@ -885,6 +935,10 @@ async function updateCodexResumeProgressCard(
 ): Promise<void> {
   try {
     await updateManagedCard(ctx.channel, messageId, codexResumeProgressCard(lines.join('\n')));
+    log.info('session', 'codex-resume-watch-card-updated', {
+      messageId,
+      lines: lines.length,
+    });
   } catch (err) {
     log.warn('session', 'codex-resume-watch-card-update-failed', {
       message: err instanceof Error ? err.message : String(err),

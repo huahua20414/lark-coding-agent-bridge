@@ -263,6 +263,30 @@ describe('agent-aware resume commands', () => {
     });
   });
 
+  it('keeps watching an interrupted Codex transcript because app-server can mark active turns that way', async () => {
+    const h = await createHarness('codex');
+    h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
+    h.codexTranscripts.set('thread-alpha-secret', [
+      { status: 'interrupted', user: 'new question', assistant: 'partial answer' },
+    ]);
+
+    await expect(h.run('/resume')).resolves.toBe(true);
+    const [nonce] = resumeArgsFromCard(lastContent(h.channel));
+    await expect(h.run(`/resume use ${nonce}`)).resolves.toBe(true);
+
+    expect(lastContentString(h.channel)).toContain('正在进行的消息');
+    expect(lastContentString(h.channel)).toContain('partial answer');
+
+    h.codexTranscripts.set('thread-alpha-secret', [
+      { status: 'interrupted', user: 'new question', assistant: 'partial answer plus more' },
+    ]);
+    await vi.waitFor(() => {
+      const updates = JSON.stringify(h.channel.rawClient.requests);
+      expect(updates).toContain('任务进度更新');
+      expect(updates).toContain('plus more');
+    });
+  });
+
   it('resumes a Codex history selection from the card button callback', async () => {
     const h = await createHarness('codex');
     h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
