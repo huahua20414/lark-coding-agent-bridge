@@ -23,6 +23,7 @@ import {
   runServiceStop,
   runServiceUnregister,
 } from './commands/service';
+import { runCodexDualSetup } from './commands/setup';
 import { runStart } from './commands/start';
 
 const program = new Command();
@@ -131,6 +132,34 @@ profile
       force: opts.force,
       includeSecrets: opts.includeSecrets,
       yes: opts.yes,
+    });
+  });
+
+const setup = program
+  .command('setup')
+  .description('Guided setup flows for common bridge layouts');
+
+setup
+  .command('codex-dual')
+  .description('Create and start a Codex chat bot plus a Codex completion notification bot')
+  .option('--main-profile <name>', 'main chat profile name (default codex)')
+  .option('--notify-profile <name>', 'completion notification profile name (default <main>-notify)')
+  .option('--workspace <path>', 'initial working directory for both profiles')
+  .option('--no-start', 'create profiles only; do not start background services')
+  .option('--skip-check-lark-cli', 'skip lark-cli pre-flight check (auto-install + bind)')
+  .action(async (opts: {
+    mainProfile?: string;
+    notifyProfile?: string;
+    workspace?: string;
+    start?: boolean;
+    skipCheckLarkCli?: boolean;
+  }) => {
+    await runCodexDualSetup({
+      mainProfile: opts.mainProfile,
+      notifyProfile: opts.notifyProfile,
+      workspace: opts.workspace,
+      noStart: opts.start === false,
+      skipCheckLarkCli: opts.skipCheckLarkCli,
     });
   });
 

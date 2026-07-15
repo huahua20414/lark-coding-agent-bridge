@@ -59,6 +59,21 @@ lark-channel-bridge start --app-id cli_xxx
 
 For Lark global apps, add `--tenant lark`.
 
+## Codex dual-bot setup
+
+To run the common two-bot Codex layout, use the guided setup:
+
+```bash
+lark-channel-bridge setup codex-dual --workspace /path/to/project
+```
+
+It creates two Codex profiles:
+
+- `codex`: the main chat bot.
+- `codex-notify`: the completion notification bot.
+
+On a fresh machine the terminal shows two QR codes, one for each bot app. Existing profiles are reused, so rerunning the command starts the services without forcing app recreation. Add `--no-start` to create profiles only.
+
 ## Background service
 
 Use `run` for first-run setup and foreground debugging. After the bot can send and receive messages, stop the foreground process with `Ctrl-C`, then use an OS-managed service for background operation:

@@ -59,6 +59,21 @@ lark-channel-bridge start --app-id cli_xxx
 
 Lark 国际版应用可加 `--tenant lark`。
 
+## Codex 双机器人一键配置
+
+常见的 Codex 双机器人布局可以直接跑向导：
+
+```bash
+lark-channel-bridge setup codex-dual --workspace /path/to/project
+```
+
+它会创建两个 Codex profile：
+
+- `codex`：主聊天机器人。
+- `codex-notify`：任务完成通知机器人。
+
+全新机器上会依次显示两个二维码，分别创建两个 bot app。已有 profile 会被复用，所以重复执行不会强制重建应用。加 `--no-start` 可以只创建 profile，不启动后台服务。
+
 ## 后台运行
 
 `run` 适合首次配置和前台调试。确认 bot 能正常收发消息后，先用 `Ctrl-C` 停掉前台进程，再用系统服务常驻后台：
