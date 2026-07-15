@@ -177,7 +177,7 @@ interface ResumeCandidate {
 }
 
 const RESUME_CANDIDATE_TTL_MS = 10 * 60 * 1000;
-const CODEX_RESUME_WATCH_TIMEOUT_MS = 20 * 60 * 1000;
+const CODEX_RESUME_WATCH_TIMEOUT_MS = 60 * 60 * 1000;
 const CODEX_RESUME_WATCH_POLL_MS = 5000;
 const resumeCandidates = new Map<string, ResumeCandidate>();
 const codexResumeWatchers = new Map<string, { cancel(): void }>();
@@ -809,7 +809,7 @@ function quoteMarkdown(text: string): string {
   if (!normalized) return '> (空)';
   return normalized
     .split('\n')
-    .map((line) => `> ${line}`)
+    .map((line) => (line.trim() ? `> ${line}` : ''))
     .join('\n');
 }
 
@@ -872,7 +872,7 @@ async function startCodexResumeWatcher(
     if (cancelled) return;
     if (Date.now() - startedAt >= watchConfig.timeoutMs) {
       codexResumeWatchers.delete(key);
-      cardLines.push('', 'Codex 任务跟踪已停止：超过 20 分钟。');
+      appendCodexResumeStopStatus(cardLines, 'Codex 任务跟踪已停止：超过 1 小时。');
       await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
       log.info('session', 'codex-resume-watch-timeout', { threadId });
       return;
@@ -896,16 +896,22 @@ async function startCodexResumeWatcher(
         lastFingerprint = fingerprint;
         const appended = appendCodexResumeMessage(cardLines, lastMessage, message);
         lastMessage = message;
-        if (appended) {
-          changed = true;
-          await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
-        }
+        if (appended) changed = true;
       } else if (!snapshot.hasInProgress && lastFingerprint) {
-        cardLines.push('', 'Codex 任务已完成。');
+        appendCodexResumeStopStatus(cardLines, 'Codex 任务跟踪已停止：任务已完成。');
         changed = true;
-        await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
       }
     }
+    if (!snapshot?.hasInProgress) {
+      appendCodexResumeStopStatus(
+        cardLines,
+        snapshot?.message
+          ? 'Codex 任务跟踪已停止：任务已完成。'
+          : 'Codex 任务跟踪已停止：当前会话暂无进行中的任务。',
+      );
+      changed = true;
+    }
+    if (changed) await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
     log.info('session', 'codex-resume-watch-tick', {
       threadId,
       status: snapshot?.message?.status,
@@ -963,6 +969,11 @@ function appendCodexResumeMessage(
   }
   lines.push('', formatCodexResumeMessage(next));
   return true;
+}
+
+function appendCodexResumeStopStatus(lines: string[], status: string): void {
+  if (lines[lines.length - 1] === status) return;
+  lines.push('', status);
 }
 
 function codexResumeWatcherKey(ctx: CommandContext): string {

@@ -260,7 +260,24 @@ describe('agent-aware resume commands', () => {
       const updates = JSON.stringify(h.channel.rawClient.requests);
       expect(updates).toContain('任务已完成');
       expect(updates).toContain('final answer');
+      expect(updates).toContain('Codex 任务跟踪已停止：任务已完成。');
     });
+  });
+
+  it('does not render blockquote markers on blank transcript lines', async () => {
+    const h = await createHarness('codex');
+    h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
+    h.codexTranscripts.set('thread-alpha-secret', [
+      { status: 'inProgress', assistant: 'line one\n\nline two' },
+    ]);
+
+    await expect(h.run('/resume')).resolves.toBe(true);
+    const [nonce] = resumeArgsFromCard(lastContent(h.channel));
+    await expect(h.run(`/resume use ${nonce}`)).resolves.toBe(true);
+
+    const rendered = lastCardMarkdown(h.channel);
+    expect(rendered).toContain('> line one\n\n> line two');
+    expect(rendered).not.toContain('> line one\n> \n> line two');
   });
 
   it('keeps watching an interrupted Codex transcript because app-server can mark active turns that way', async () => {
@@ -539,6 +556,14 @@ function lastContent(channel: FakeChannel): Record<string, unknown> {
 
 function lastContentString(channel: FakeChannel): string {
   return JSON.stringify(lastContent(channel));
+}
+
+function lastCardMarkdown(channel: FakeChannel): string {
+  const content = lastContent(channel);
+  const card = content.card as { elements?: unknown[] } | undefined;
+  const first = card?.elements?.[0] as { text?: { content?: unknown } } | undefined;
+  expect(first?.text?.content).toBeTypeOf('string');
+  return first?.text?.content as string;
 }
 
 function resumeNonce(markdown: string): string {
