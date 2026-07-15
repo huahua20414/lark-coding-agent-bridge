@@ -145,6 +145,10 @@ export interface CommandContext {
   codexTranscriptProvider?: (
     options: ReadCodexThreadTranscriptOptions,
   ) => Promise<CodexTranscriptTurn[]>;
+  codexResumeWatch?: {
+    pollIntervalMs?: number;
+    timeoutMs?: number;
+  };
   claudeHistoryProvider?: (cwd: string, limit: number) => Promise<SessionSummary[]>;
   /** Set when invoked from a CardKit 2.0 form submit. Keys are input `name`s. */
   formValue?: Record<string, unknown>;
@@ -167,7 +171,10 @@ interface ResumeCandidate {
 }
 
 const RESUME_CANDIDATE_TTL_MS = 10 * 60 * 1000;
+const CODEX_RESUME_WATCH_TIMEOUT_MS = 20 * 60 * 1000;
+const CODEX_RESUME_WATCH_POLL_MS = 2000;
 const resumeCandidates = new Map<string, ResumeCandidate>();
+const codexResumeWatchers = new Map<string, { cancel(): void }>();
 const AUDIT_SAFE_COMMAND_REPLY = '命令已处理。';
 const RESUME_APPLIED_REPLY = '已完成，请继续发送下一条消息。';
 
@@ -333,6 +340,7 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
   }
 
   const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
+  cancelCodexResumeWatcher(ctx);
   if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
     ctx.sessionCatalog.archiveActive({
       ...ctx.sessionCatalogIdentity,
@@ -399,6 +407,7 @@ async function handleCd(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
   ctx.activeRuns.interrupt(ctx.scope);
+  cancelCodexResumeWatcher(ctx);
   ctx.workspaces.setCwd(ctx.scope, workspace.cwdRealpath);
   ctx.sessions.clear(ctx.scope);
   await reply(ctx, `✓ 已切换 cwd 到 \`${workspace.cwdRealpath}\`\n（session 已重置）`);
@@ -464,6 +473,7 @@ async function handleWsUse(name: string, ctx: CommandContext): Promise<void> {
     return;
   }
   ctx.activeRuns.interrupt(ctx.scope);
+  cancelCodexResumeWatcher(ctx);
   ctx.workspaces.setCwd(ctx.scope, workspace.cwdRealpath);
   ctx.sessions.clear(ctx.scope);
   await reply(ctx, `✓ 已切换到 \`${name}\` (${workspace.cwdRealpath})\n（session 已重置）`);
@@ -624,7 +634,11 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
           policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
           threadId: resolved.threadId!,
         });
-        await reply(ctx, await resumeAppliedReplyWithCodexHistory(ctx, resolved.threadId!));
+        const snapshot = await readCodexResumeSnapshot(ctx, resolved.threadId!);
+        await reply(ctx, formatCodexResumeAppliedReply(snapshot));
+        if (snapshot?.hasInProgress) {
+          startCodexResumeWatcher(ctx, resolved.threadId!, fingerprintCodexResumeMessage(snapshot.message));
+        }
         return;
       } else {
         ctx.sessionCatalog.upsertActive({
@@ -671,14 +685,14 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
   await reply(ctx, RESUME_APPLIED_REPLY);
 }
 
-async function resumeAppliedReplyWithCodexHistory(
+async function readCodexResumeSnapshot(
   ctx: CommandContext,
   threadId: string,
-): Promise<string> {
-  if (ctx.chatMode !== 'p2p') return RESUME_APPLIED_REPLY;
+): Promise<CodexResumeSnapshot | undefined> {
+  if (ctx.chatMode !== 'p2p') return undefined;
   const codex = ctx.controls.profileConfig.codex;
   const binary = codex?.binaryPath;
-  if (!binary) return RESUME_APPLIED_REPLY;
+  if (!binary) return undefined;
   const provider = ctx.codexTranscriptProvider ?? readCodexThreadTranscript;
   try {
     const turns = await provider({
@@ -691,19 +705,26 @@ async function resumeAppliedReplyWithCodexHistory(
         ? { inheritCodexHome: codex.inheritCodexHome }
         : {}),
     });
-    const message = selectCodexResumeMessage(turns);
-    if (!message) return RESUME_APPLIED_REPLY;
-    return `${RESUME_APPLIED_REPLY}\n\n${formatCodexResumeMessage(message)}`;
+    return {
+      hasInProgress: hasInProgressTurn(turns),
+      message: selectCodexResumeMessage(turns),
+    };
   } catch (err) {
     log.warn('session', 'codex-transcript-failed', {
       message: err instanceof Error ? err.message : String(err),
     });
-    return `${RESUME_APPLIED_REPLY}\n\n最近聊天记录读取失败；会话已恢复，可以继续发送消息。`;
+    return { hasInProgress: false, historyFailed: true };
   }
 }
 
+interface CodexResumeSnapshot {
+  hasInProgress: boolean;
+  message?: CodexResumeMessage;
+  historyFailed?: boolean;
+}
+
 interface CodexResumeMessage {
-  label: '正在进行的消息' | '最新消息';
+  label: '正在进行的消息' | '最新消息' | '任务进度更新' | '任务已完成';
   role: '用户' | 'Codex';
   text: string;
 }
@@ -727,6 +748,20 @@ function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMess
   return undefined;
 }
 
+function hasInProgressTurn(turns: CodexTranscriptTurn[]): boolean {
+  return turns.some((turn) => turn.status === 'inProgress');
+}
+
+function formatCodexResumeAppliedReply(snapshot: CodexResumeSnapshot | undefined): string {
+  if (!snapshot) return RESUME_APPLIED_REPLY;
+  if (snapshot.historyFailed) {
+    return `${RESUME_APPLIED_REPLY}\n\n最近消息读取失败；会话已恢复，可以继续发送消息。`;
+  }
+  return snapshot.message
+    ? `${RESUME_APPLIED_REPLY}\n\n${formatCodexResumeMessage(snapshot.message)}`
+    : RESUME_APPLIED_REPLY;
+}
+
 function formatCodexResumeMessage(message: CodexResumeMessage): string {
   return [
     `**${message.label}**`,
@@ -743,6 +778,96 @@ function quoteMarkdown(text: string): string {
     .split('\n')
     .map((line) => `> ${line}`)
     .join('\n');
+}
+
+function startCodexResumeWatcher(
+  ctx: CommandContext,
+  threadId: string,
+  initialFingerprint: string | undefined,
+): void {
+  const key = codexResumeWatcherKey(ctx);
+  codexResumeWatchers.get(key)?.cancel();
+
+  let cancelled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let lastFingerprint = initialFingerprint;
+  const startedAt = Date.now();
+  const pollMs = codexResumeWatchConfig(ctx).pollIntervalMs;
+  const timeoutMs = codexResumeWatchConfig(ctx).timeoutMs;
+
+  const cancel = (): void => {
+    cancelled = true;
+    if (timer) clearTimeout(timer);
+  };
+  codexResumeWatchers.set(key, { cancel });
+
+  const schedule = (): void => {
+    if (cancelled) return;
+    timer = setTimeout(() => {
+      void tick();
+    }, pollMs);
+  };
+
+  const tick = async (): Promise<void> => {
+    if (cancelled) return;
+    if (Date.now() - startedAt >= timeoutMs) {
+      codexResumeWatchers.delete(key);
+      await reply(ctx, 'Codex 任务跟踪已停止：超过 20 分钟。');
+      return;
+    }
+
+    const snapshot = await readCodexResumeSnapshot(ctx, threadId);
+    if (cancelled) return;
+    if (snapshot?.historyFailed) {
+      schedule();
+      return;
+    }
+    if (snapshot?.message) {
+      const message = {
+        ...snapshot.message,
+        label: snapshot.hasInProgress ? '任务进度更新' : '任务已完成',
+      } satisfies CodexResumeMessage;
+      const fingerprint = fingerprintCodexResumeMessage(message);
+      if (fingerprint && fingerprint !== lastFingerprint) {
+        lastFingerprint = fingerprint;
+        await reply(ctx, formatCodexResumeMessage(message));
+      } else if (!snapshot.hasInProgress && lastFingerprint) {
+        await reply(ctx, 'Codex 任务已完成。');
+      }
+    }
+
+    if (!snapshot?.hasInProgress) {
+      codexResumeWatchers.delete(key);
+      return;
+    }
+    schedule();
+  };
+
+  schedule();
+}
+
+function codexResumeWatcherKey(ctx: CommandContext): string {
+  return `${ctx.controls.profile}:${ctx.scope}`;
+}
+
+function cancelCodexResumeWatcher(ctx: CommandContext): void {
+  const key = codexResumeWatcherKey(ctx);
+  const watcher = codexResumeWatchers.get(key);
+  if (!watcher) return;
+  watcher.cancel();
+  codexResumeWatchers.delete(key);
+}
+
+function codexResumeWatchConfig(ctx: CommandContext): { pollIntervalMs: number; timeoutMs: number } {
+  const overrides = ctx.codexResumeWatch;
+  return {
+    pollIntervalMs: overrides?.pollIntervalMs ?? CODEX_RESUME_WATCH_POLL_MS,
+    timeoutMs: overrides?.timeoutMs ?? CODEX_RESUME_WATCH_TIMEOUT_MS,
+  };
+}
+
+function fingerprintCodexResumeMessage(message: CodexResumeMessage | undefined): string | undefined {
+  return message ? `${message.role}\n${message.text}` : undefined;
 }
 
 function issueResumeCandidate(

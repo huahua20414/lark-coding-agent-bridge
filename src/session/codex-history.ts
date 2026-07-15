@@ -383,7 +383,7 @@ function parseThreadReadResponse(
   }
   return {
     ok: true,
-    turns: turns.map(parseTranscriptTurn).filter(hasTranscriptText).slice(-Math.max(0, maxTurns)),
+    turns: turns.map(parseTranscriptTurn).slice(-Math.max(0, maxTurns)),
   };
 }
 
@@ -425,10 +425,6 @@ function userInputText(input: unknown): string | undefined {
     })
     .filter((part): part is string => Boolean(part?.trim()));
   return parts.length > 0 ? parts.join('\n').trim() : undefined;
-}
-
-function hasTranscriptText(turn: CodexTranscriptTurn): boolean {
-  return Boolean(turn.user || turn.assistant);
 }
 
 function normalizeThread(input: unknown): CodexThreadHistoryEntry | undefined {

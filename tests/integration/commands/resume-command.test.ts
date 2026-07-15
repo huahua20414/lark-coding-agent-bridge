@@ -252,6 +252,14 @@ describe('agent-aware resume commands', () => {
     expect(reply).toContain('partial answer');
     expect(reply).not.toContain('old answer');
     expect(reply).not.toContain('new question');
+
+    h.codexTranscripts.set('thread-alpha-secret', [
+      { status: 'completed', user: 'new question', assistant: 'final answer' },
+    ]);
+    await vi.waitFor(() => {
+      expect(lastMarkdown(h.channel)).toContain('任务已完成');
+      expect(lastMarkdown(h.channel)).toContain('final answer');
+    });
   });
 
   it('resumes a Codex history selection from the card button callback', async () => {
@@ -368,6 +376,7 @@ async function createHarness(
       claudeHistoryProvider: async () => claudeHistory,
       codexHistoryProvider: async () => codexHistory,
       codexTranscriptProvider: async (options) => codexTranscripts.get(options.threadId) ?? [],
+      codexResumeWatch: { pollIntervalMs: 5, timeoutMs: 200 },
     });
 
   const dispatchResumeArg = (arg: string): Promise<void> =>
