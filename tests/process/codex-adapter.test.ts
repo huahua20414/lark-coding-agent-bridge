@@ -196,6 +196,7 @@ describe('CodexAdapter process contract', () => {
       approvalPolicy: 'never',
       sandbox: 'workspace-write',
       threadSource: 'lark-channel-bridge',
+      historyMode: 'legacy',
       config: {
         shell_environment_policy: {
           inherit: 'all',

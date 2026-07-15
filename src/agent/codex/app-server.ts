@@ -397,7 +397,7 @@ function threadRequest(input: CodexAppServerRunInput) {
     params: {
       ...base,
       threadSource: 'lark-channel-bridge',
-      historyMode: 'paginated',
+      historyMode: 'legacy',
     },
   };
 }
