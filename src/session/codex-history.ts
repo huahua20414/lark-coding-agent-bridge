@@ -29,6 +29,7 @@ export interface CodexThreadHistoryEntry {
 }
 
 export interface CodexTranscriptTurn {
+  status?: string;
   user?: string;
   assistant?: string;
 }
@@ -403,6 +404,7 @@ function parseTranscriptTurn(input: unknown): CodexTranscriptTurn {
     }
   }
   return {
+    ...(stringValue(raw?.status) ? { status: stringValue(raw?.status) } : {}),
     ...(users.length > 0 ? { user: users.join('\n\n') } : {}),
     ...(assistants.length > 0 ? { assistant: assistants.join('\n\n') } : {}),
   };

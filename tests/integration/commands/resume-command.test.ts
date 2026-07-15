@@ -212,7 +212,7 @@ describe('agent-aware resume commands', () => {
     expect(lastMarkdown(h.channel)).toContain('已完成');
   });
 
-  it('shows the last ten Codex transcript turns after resuming a history selection', async () => {
+  it('shows only the latest Codex transcript message after resuming a history selection', async () => {
     const h = await createHarness('codex');
     h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
     h.codexTranscripts.set(
@@ -228,11 +228,30 @@ describe('agent-aware resume commands', () => {
     await expect(h.run(`/resume use ${nonce}`)).resolves.toBe(true);
 
     const reply = lastMarkdown(h.channel);
-    expect(reply).toContain('最近 10 轮聊天记录');
-    expect(reply).toContain('question 3');
+    expect(reply).toContain('最新消息');
     expect(reply).toContain('answer 12');
-    expect(reply).not.toMatch(/^> question 1$/m);
+    expect(reply).not.toContain('question 12');
+    expect(reply).not.toContain('answer 11');
     expect(reply).not.toContain('thread-alpha-secret');
+  });
+
+  it('prefers an in-progress Codex transcript message after resuming', async () => {
+    const h = await createHarness('codex');
+    h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
+    h.codexTranscripts.set('thread-alpha-secret', [
+      { status: 'completed', user: 'old question', assistant: 'old answer' },
+      { status: 'inProgress', user: 'new question', assistant: 'partial answer' },
+    ]);
+
+    await expect(h.run('/resume')).resolves.toBe(true);
+    const [nonce] = resumeArgsFromCard(lastContent(h.channel));
+    await expect(h.run(`/resume use ${nonce}`)).resolves.toBe(true);
+
+    const reply = lastMarkdown(h.channel);
+    expect(reply).toContain('正在进行的消息');
+    expect(reply).toContain('partial answer');
+    expect(reply).not.toContain('old answer');
+    expect(reply).not.toContain('new question');
   });
 
   it('resumes a Codex history selection from the card button callback', async () => {

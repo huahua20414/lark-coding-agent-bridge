@@ -685,15 +685,15 @@ async function resumeAppliedReplyWithCodexHistory(
       binary,
       threadId,
       profileStateDir: commandProfilePaths(ctx).profileDir,
-      maxTurns: 10,
+      maxTurns: 20,
       ...(codex.codexHome ? { codexHome: codex.codexHome } : {}),
       ...(codex.inheritCodexHome !== undefined
         ? { inheritCodexHome: codex.inheritCodexHome }
         : {}),
     });
-    const recentTurns = turns.slice(-10);
-    if (recentTurns.length === 0) return RESUME_APPLIED_REPLY;
-    return `${RESUME_APPLIED_REPLY}\n\n${formatCodexTranscriptPreview(recentTurns)}`;
+    const message = selectCodexResumeMessage(turns);
+    if (!message) return RESUME_APPLIED_REPLY;
+    return `${RESUME_APPLIED_REPLY}\n\n${formatCodexResumeMessage(message)}`;
   } catch (err) {
     log.warn('session', 'codex-transcript-failed', {
       message: err instanceof Error ? err.message : String(err),
@@ -702,17 +702,38 @@ async function resumeAppliedReplyWithCodexHistory(
   }
 }
 
-function formatCodexTranscriptPreview(turns: CodexTranscriptTurn[]): string {
-  const lines = ['**最近 10 轮聊天记录**'];
-  turns.forEach((turn, index) => {
-    lines.push('', `**${index + 1}. 用户**`);
-    lines.push(turn.user ? quoteMarkdown(turn.user) : '> (无用户消息)');
-    if (turn.assistant) {
-      lines.push('', '**Codex**');
-      lines.push(quoteMarkdown(turn.assistant));
+interface CodexResumeMessage {
+  label: '正在进行的消息' | '最新消息';
+  role: '用户' | 'Codex';
+  text: string;
+}
+
+function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMessage | undefined {
+  const ongoing = [...turns].reverse().find((turn) => turn.status === 'inProgress');
+  if (ongoing) {
+    const text = ongoing.assistant ?? ongoing.user;
+    if (text) {
+      return {
+        label: '正在进行的消息',
+        role: ongoing.assistant ? 'Codex' : '用户',
+        text,
+      };
     }
-  });
-  return lines.join('\n');
+  }
+  for (const turn of [...turns].reverse()) {
+    if (turn.assistant) return { label: '最新消息', role: 'Codex', text: turn.assistant };
+    if (turn.user) return { label: '最新消息', role: '用户', text: turn.user };
+  }
+  return undefined;
+}
+
+function formatCodexResumeMessage(message: CodexResumeMessage): string {
+  return [
+    `**${message.label}**`,
+    '',
+    `**${message.role}**`,
+    quoteMarkdown(message.text),
+  ].join('\n');
 }
 
 function quoteMarkdown(text: string): string {
