@@ -411,9 +411,12 @@ function parseTranscriptTurn(input: unknown, maxMessageChars: number): CodexTran
     }
   }
   const completedAt = numberValue(raw?.completedAt);
+  const completedAtMs =
+    numberValue(raw?.completedAtMs) ??
+    (completedAt !== undefined ? Math.round(completedAt * 1000) : undefined);
   return {
     ...(stringValue(raw?.status) ? { status: stringValue(raw?.status) } : {}),
-    ...(completedAt ? { completedAtMs: Math.round(completedAt * 1000) } : {}),
+    ...(completedAtMs !== undefined ? { completedAtMs } : {}),
     ...(users.length > 0 ? { user: users.join('\n\n') } : {}),
     ...(assistants.length > 0 ? { assistant: assistants.join('\n\n') } : {}),
   };
@@ -481,7 +484,10 @@ function stringValue(input: unknown): string | undefined {
 }
 
 function numberValue(input: unknown): number | undefined {
-  return typeof input === 'number' && Number.isFinite(input) ? input : undefined;
+  if (typeof input === 'number' && Number.isFinite(input)) return input;
+  if (typeof input !== 'string' || !input.trim()) return undefined;
+  const value = Number(input);
+  return Number.isFinite(value) ? value : undefined;
 }
 
 function recordValue(input: unknown): Record<string, unknown> | undefined {

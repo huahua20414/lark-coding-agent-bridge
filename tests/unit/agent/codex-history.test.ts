@@ -348,7 +348,7 @@ rl.on('line', (line) => {
                 status: 'completed',
                 error: null,
                 startedAt: 3,
-                completedAt: 4,
+                completedAt: '4',
                 durationMs: 1
               }
             ]

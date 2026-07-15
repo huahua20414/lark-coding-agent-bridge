@@ -713,9 +713,12 @@ async function readCodexResumeSnapshot(
         ? { inheritCodexHome: codex.inheritCodexHome }
         : {}),
     });
+    const lastTurn = turns[turns.length - 1];
     return {
       hasInProgress: hasInProgressTurn(turns),
       message: selectCodexResumeMessage(turns),
+      lastStatus: lastTurn?.status,
+      lastCompletedAtMs: lastTurn?.completedAtMs,
     };
   } catch (err) {
     log.warn('session', 'codex-transcript-failed', {
@@ -729,6 +732,8 @@ interface CodexResumeSnapshot {
   hasInProgress: boolean;
   message?: CodexResumeMessage;
   historyFailed?: boolean;
+  lastStatus?: string;
+  lastCompletedAtMs?: number;
 }
 
 interface CodexResumeMessage {
@@ -736,6 +741,7 @@ interface CodexResumeMessage {
   role: '用户' | 'Codex';
   text: string;
   status?: string;
+  completedAtMs?: number;
 }
 
 function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMessage | undefined {
@@ -748,6 +754,7 @@ function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMess
         role: ongoing.assistant ? 'Codex' : '用户',
         text,
         ...(ongoing.status ? { status: ongoing.status } : {}),
+        ...(ongoing.completedAtMs !== undefined ? { completedAtMs: ongoing.completedAtMs } : {}),
       };
     }
   }
@@ -758,6 +765,7 @@ function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMess
         role: 'Codex',
         text: turn.assistant,
         ...(turn.status ? { status: turn.status } : {}),
+        ...(turn.completedAtMs !== undefined ? { completedAtMs: turn.completedAtMs } : {}),
       };
     }
     if (turn.user) {
@@ -766,6 +774,7 @@ function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMess
         role: '用户',
         text: turn.user,
         ...(turn.status ? { status: turn.status } : {}),
+        ...(turn.completedAtMs !== undefined ? { completedAtMs: turn.completedAtMs } : {}),
       };
     }
   }
@@ -854,6 +863,7 @@ async function startCodexResumeWatcher(
       pollIntervalMs: watchConfig.pollIntervalMs,
       timeoutMs: watchConfig.timeoutMs,
       initialStatus: lastMessage?.status,
+      initialCompletedAtMs: lastMessage?.completedAtMs,
       hasInitialMessage: Boolean(lastMessage),
     });
   } catch (err) {
@@ -920,6 +930,9 @@ async function startCodexResumeWatcher(
     log.info('session', 'codex-resume-watch-tick', {
       threadId,
       status: snapshot?.message?.status,
+      messageCompletedAtMs: snapshot?.message?.completedAtMs,
+      lastStatus: snapshot?.lastStatus,
+      lastCompletedAtMs: snapshot?.lastCompletedAtMs,
       hasInProgress: snapshot?.hasInProgress === true,
       hasMessage: Boolean(snapshot?.message),
       changed,
@@ -930,6 +943,9 @@ async function startCodexResumeWatcher(
       log.info('session', 'codex-resume-watch-stopped', {
         threadId,
         status: snapshot?.message?.status,
+        messageCompletedAtMs: snapshot?.message?.completedAtMs,
+        lastStatus: snapshot?.lastStatus,
+        lastCompletedAtMs: snapshot?.lastCompletedAtMs,
       });
       return;
     }
