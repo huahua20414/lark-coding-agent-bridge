@@ -28,6 +28,11 @@ export interface CodexThreadHistoryEntry {
   name?: string;
 }
 
+export interface CodexTranscriptTurn {
+  user?: string;
+  assistant?: string;
+}
+
 export interface ListCodexThreadHistoryOptions {
   binary: string;
   cwd: string;
@@ -38,6 +43,16 @@ export interface ListCodexThreadHistoryOptions {
   timeoutMs?: number;
   sourceKinds?: readonly CodexThreadSourceKind[];
   useStateDbOnly?: boolean;
+}
+
+export interface ReadCodexThreadTranscriptOptions {
+  binary: string;
+  threadId: string;
+  profileStateDir: string;
+  codexHome?: string;
+  inheritCodexHome?: boolean;
+  timeoutMs?: number;
+  maxTurns?: number;
 }
 
 export type CodexHistoryErrorCode =
@@ -170,7 +185,117 @@ export async function listCodexThreadHistory(
   return result;
 }
 
-function spawnCodexAppServer(options: ListCodexThreadHistoryOptions): CodexAppServerChild {
+export async function readCodexThreadTranscript(
+  options: ReadCodexThreadTranscriptOptions,
+): Promise<CodexTranscriptTurn[]> {
+  const child = spawnCodexAppServer(options);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
+  const stderrChunks: Buffer[] = [];
+  let settled = false;
+
+  const result = await new Promise<CodexTranscriptTurn[]>((resolve, reject) => {
+    const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const fail = (err: unknown): void => {
+      if (settled) return;
+      reject(
+        err instanceof CodexHistoryError
+          ? err
+          : new CodexHistoryError('spawn-failed', errorMessage(err)),
+      );
+      cleanup({ kill: true });
+    };
+
+    const cleanup = (options: { kill: boolean }): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      rl.close();
+      child.removeListener('error', fail);
+      child.stdin.removeListener('error', fail);
+      child.stderr.removeAllListeners('data');
+      if (options.kill && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    };
+
+    timer = setTimeout(() => {
+      reject(new CodexHistoryError('timeout', `codex transcript query timed out after ${timeoutMs}ms`));
+      cleanup({ kill: true });
+    }, timeoutMs);
+
+    child.once('error', fail);
+    child.stdin.once('error', fail);
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrChunks.push(chunk);
+    });
+
+    rl.on('line', (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let msg: unknown;
+      try {
+        msg = JSON.parse(trimmed);
+      } catch {
+        return;
+      }
+      const response = recordValue(msg);
+      if (!response || response.id !== 2) return;
+      if (response.error) {
+        const err = recordValue(response.error);
+        reject(
+          new CodexHistoryError(
+            'app-server-error',
+            typeof err?.message === 'string' ? err.message : 'codex app-server rejected transcript query',
+          ),
+        );
+        cleanup({ kill: true });
+        return;
+      }
+      const parsed = parseThreadReadResponse(response.result, options.maxTurns ?? 10);
+      if (!parsed.ok) {
+        reject(parsed.error);
+        cleanup({ kill: true });
+        return;
+      }
+      resolve(parsed.turns);
+      cleanup({ kill: true });
+    });
+
+    child.once('exit', (code) => {
+      if (settled) return;
+      const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
+      reject(
+        new CodexHistoryError(
+          'spawn-failed',
+          `codex app-server exited before transcript response: ${code ?? 'signal'}${stderr ? `: ${stderr}` : ''}`,
+        ),
+      );
+      cleanup({ kill: true });
+    });
+
+    try {
+      child.stdin.write(
+        `${JSON.stringify(initializeRequest())}\n${JSON.stringify(readRequest(options))}\n`,
+        'utf8',
+        (err?: Error | null) => {
+          if (err) fail(err);
+        },
+      );
+    } catch (err) {
+      fail(err);
+    }
+  });
+
+  await waitForChildExit(child, 250);
+  return result;
+}
+
+function spawnCodexAppServer(options: {
+  binary: string;
+  profileStateDir: string;
+  codexHome?: string;
+  inheritCodexHome?: boolean;
+}): CodexAppServerChild {
   const envOverrides: NodeJS.ProcessEnv = {};
   if (options.codexHome) {
     envOverrides.CODEX_HOME = options.codexHome;
@@ -215,6 +340,17 @@ function listRequest(options: ListCodexThreadHistoryOptions) {
   };
 }
 
+function readRequest(options: ReadCodexThreadTranscriptOptions) {
+  return {
+    method: 'thread/read',
+    id: 2,
+    params: {
+      threadId: options.threadId,
+      includeTurns: true,
+    },
+  };
+}
+
 function parseThreadListResponse(
   input: unknown,
 ): { ok: true; entries: CodexThreadHistoryEntry[] } | { ok: false; error: CodexHistoryError } {
@@ -229,6 +365,68 @@ function parseThreadListResponse(
     ok: true,
     entries: raw.data.map(normalizeThread).filter((entry): entry is CodexThreadHistoryEntry => Boolean(entry)),
   };
+}
+
+function parseThreadReadResponse(
+  input: unknown,
+  maxTurns: number,
+): { ok: true; turns: CodexTranscriptTurn[] } | { ok: false; error: CodexHistoryError } {
+  const raw = recordValue(input);
+  const thread = recordValue(raw?.thread);
+  const turns = Array.isArray(thread?.turns) ? thread.turns : undefined;
+  if (!turns) {
+    return {
+      ok: false,
+      error: new CodexHistoryError('malformed-response', 'codex app-server returned malformed thread/read response'),
+    };
+  }
+  return {
+    ok: true,
+    turns: turns.map(parseTranscriptTurn).filter(hasTranscriptText).slice(-Math.max(0, maxTurns)),
+  };
+}
+
+function parseTranscriptTurn(input: unknown): CodexTranscriptTurn {
+  const raw = recordValue(input);
+  const items = Array.isArray(raw?.items) ? raw.items : [];
+  const users: string[] = [];
+  const assistants: string[] = [];
+  for (const itemInput of items) {
+    const item = recordValue(itemInput);
+    if (!item) continue;
+    if (item.type === 'userMessage') {
+      const text = userInputText(item.content);
+      if (text) users.push(normalizeSessionPreview(text, 500));
+    } else if (item.type === 'agentMessage') {
+      const text = stringValue(item.text)?.trim();
+      if (text) assistants.push(normalizeSessionPreview(text, 500));
+    }
+  }
+  return {
+    ...(users.length > 0 ? { user: users.join('\n\n') } : {}),
+    ...(assistants.length > 0 ? { assistant: assistants.join('\n\n') } : {}),
+  };
+}
+
+function userInputText(input: unknown): string | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const parts = input
+    .map((itemInput) => {
+      const item = recordValue(itemInput);
+      if (!item) return undefined;
+      if (item.type === 'text') return stringValue(item.text);
+      if (item.type === 'localImage') return '[本地图片]';
+      if (item.type === 'image') return '[图片]';
+      if (item.type === 'skill') return `[skill:${stringValue(item.name) ?? ''}]`;
+      if (item.type === 'mention') return `@${stringValue(item.name) ?? 'mention'}`;
+      return undefined;
+    })
+    .filter((part): part is string => Boolean(part?.trim()));
+  return parts.length > 0 ? parts.join('\n').trim() : undefined;
+}
+
+function hasTranscriptText(turn: CodexTranscriptTurn): boolean {
+  return Boolean(turn.user || turn.assistant);
 }
 
 function normalizeThread(input: unknown): CodexThreadHistoryEntry | undefined {

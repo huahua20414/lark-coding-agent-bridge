@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   CodexHistoryError,
   listCodexThreadHistory,
+  readCodexThreadTranscript,
 } from '../../../src/session/codex-history.js';
 import { buildAgentPrompt } from '../../../src/agent/prompt.js';
 
@@ -154,6 +155,34 @@ describe('Codex thread history provider', () => {
 
     expect(entries[0]?.preview).toBe('Codex 真实用户问题 第二行');
   });
+
+  it('reads recent Codex transcript turns from thread/read', async () => {
+    const fake = await createFakeCodex();
+    cleanup.push(fake.dir);
+
+    const turns = await readCodexThreadTranscript({
+      binary: fake.path,
+      threadId: 'thread-new',
+      profileStateDir: fake.dir,
+      maxTurns: 1,
+      timeoutMs: 5000,
+    });
+
+    expect(turns).toEqual([
+      {
+        user: 'second question',
+        assistant: 'second answer',
+      },
+    ]);
+
+    const record = JSON.parse(await readFile(fake.recordPath, 'utf8')) as {
+      requests: Array<{ method: string; params?: unknown }>;
+    };
+    expect(record.requests).toMatchObject([
+      { method: 'initialize' },
+      { method: 'thread/read', params: { threadId: 'thread-new', includeTurns: true } },
+    ]);
+  });
 });
 
 async function createFakeCodex(options: { failList?: boolean; firstPreview?: string } = {}): Promise<FakeCodex> {
@@ -271,6 +300,59 @@ rl.on('line', (line) => {
           }
         }) + '\\n');
       }
+    }, 25);
+  } else if (req.method === 'thread/read') {
+    setTimeout(() => {
+      persist();
+      process.stdout.write(JSON.stringify({
+        id: req.id,
+        result: {
+          thread: {
+            id: req.params.threadId,
+            sessionId: req.params.threadId,
+            preview: 'new thread prompt',
+            cwd: '/repo',
+            turns: [
+              {
+                id: 'turn-1',
+                items: [
+                  {
+                    type: 'userMessage',
+                    id: 'user-1',
+                    clientId: null,
+                    content: [{ type: 'text', text: 'first question', text_elements: [] }]
+                  },
+                  { type: 'agentMessage', id: 'agent-1', text: 'first answer', phase: null, memoryCitation: null }
+                ],
+                itemsView: 'complete',
+                status: 'completed',
+                error: null,
+                startedAt: 1,
+                completedAt: 2,
+                durationMs: 1
+              },
+              {
+                id: 'turn-2',
+                items: [
+                  {
+                    type: 'userMessage',
+                    id: 'user-2',
+                    clientId: null,
+                    content: [{ type: 'text', text: 'second question', text_elements: [] }]
+                  },
+                  { type: 'agentMessage', id: 'agent-2', text: 'second answer', phase: null, memoryCitation: null }
+                ],
+                itemsView: 'complete',
+                status: 'completed',
+                error: null,
+                startedAt: 3,
+                completedAt: 4,
+                durationMs: 1
+              }
+            ]
+          }
+        }
+      }) + '\\n');
     }, 25);
   }
 });

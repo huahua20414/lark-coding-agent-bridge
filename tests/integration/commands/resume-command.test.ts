@@ -15,6 +15,7 @@ import { SessionCatalog, type SessionCatalogIdentity } from '../../../src/sessio
 import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
 import type { CodexThreadHistoryEntry } from '../../../src/session/codex-history.js';
+import type { CodexTranscriptTurn } from '../../../src/session/codex-history.js';
 import type { SessionSummary } from '../../../src/session/history.js';
 import { createFakeAgent } from '../../helpers/fake-agent.js';
 import { createFakeChannel, type FakeChannel } from '../../helpers/fake-channel.js';
@@ -30,6 +31,7 @@ interface Harness {
   identity: SessionCatalogIdentity;
   claudeHistory: SessionSummary[];
   codexHistory: CodexThreadHistoryEntry[];
+  codexTranscripts: Map<string, CodexTranscriptTurn[]>;
   activeRuns: ActiveRuns;
   pending: PendingQueue;
   run(content: string, options?: { withCatalogIdentity?: boolean; chatMode?: 'p2p' | 'group' | 'topic' }): Promise<boolean>;
@@ -210,6 +212,29 @@ describe('agent-aware resume commands', () => {
     expect(lastMarkdown(h.channel)).toContain('已完成');
   });
 
+  it('shows the last ten Codex transcript turns after resuming a history selection', async () => {
+    const h = await createHarness('codex');
+    h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
+    h.codexTranscripts.set(
+      'thread-alpha-secret',
+      Array.from({ length: 12 }, (_, i) => ({
+        user: `question ${i + 1}`,
+        assistant: `answer ${i + 1}`,
+      })),
+    );
+
+    await expect(h.run('/resume')).resolves.toBe(true);
+    const [nonce] = resumeArgsFromCard(lastContent(h.channel));
+    await expect(h.run(`/resume use ${nonce}`)).resolves.toBe(true);
+
+    const reply = lastMarkdown(h.channel);
+    expect(reply).toContain('最近 10 轮聊天记录');
+    expect(reply).toContain('question 3');
+    expect(reply).toContain('answer 12');
+    expect(reply).not.toMatch(/^> question 1$/m);
+    expect(reply).not.toContain('thread-alpha-secret');
+  });
+
   it('resumes a Codex history selection from the card button callback', async () => {
     const h = await createHarness('codex');
     h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
@@ -277,6 +302,7 @@ async function createHarness(
   const catalog = new SessionCatalog(join(tmp.profile, 'session-catalog.json'));
   const claudeHistory: SessionSummary[] = [];
   const codexHistory: CodexThreadHistoryEntry[] = [];
+  const codexTranscripts = new Map<string, CodexTranscriptTurn[]>();
   const activeRuns = new ActiveRuns();
   const pending = new PendingQueue(60_000, () => {});
   const agent = createFakeAgent();
@@ -322,6 +348,7 @@ async function createHarness(
       controls,
       claudeHistoryProvider: async () => claudeHistory,
       codexHistoryProvider: async () => codexHistory,
+      codexTranscriptProvider: async (options) => codexTranscripts.get(options.threadId) ?? [],
     });
 
   const dispatchResumeArg = (arg: string): Promise<void> =>
@@ -354,6 +381,7 @@ async function createHarness(
     identity,
     claudeHistory,
     codexHistory,
+    codexTranscripts,
     activeRuns,
     pending,
     run,

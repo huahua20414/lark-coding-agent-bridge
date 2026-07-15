@@ -71,8 +71,11 @@ import {
 import { formatRelTime, listRecentSessions, type SessionSummary } from '../session/history';
 import {
   listCodexThreadHistory,
+  readCodexThreadTranscript,
   type CodexThreadHistoryEntry,
+  type CodexTranscriptTurn,
   type ListCodexThreadHistoryOptions,
+  type ReadCodexThreadTranscriptOptions,
 } from '../session/codex-history';
 import type { SessionCatalog, SessionCatalogIdentity } from '../session/catalog';
 import { isAlive, readAndPrune, resolveTarget } from '../runtime/registry';
@@ -139,6 +142,9 @@ export interface CommandContext {
   codexHistoryProvider?: (
     options: ListCodexThreadHistoryOptions,
   ) => Promise<CodexThreadHistoryEntry[]>;
+  codexTranscriptProvider?: (
+    options: ReadCodexThreadTranscriptOptions,
+  ) => Promise<CodexTranscriptTurn[]>;
   claudeHistoryProvider?: (cwd: string, limit: number) => Promise<SessionSummary[]>;
   /** Set when invoked from a CardKit 2.0 form submit. Keys are input `name`s. */
   formValue?: Record<string, unknown>;
@@ -618,6 +624,8 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
           policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
           threadId: resolved.threadId!,
         });
+        await reply(ctx, await resumeAppliedReplyWithCodexHistory(ctx, resolved.threadId!));
+        return;
       } else {
         ctx.sessionCatalog.upsertActive({
           scopeId: ctx.sessionCatalogIdentity.scopeId,
@@ -661,6 +669,59 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.sessions.set(ctx.scope, sessionId, cwd);
   await reply(ctx, RESUME_APPLIED_REPLY);
+}
+
+async function resumeAppliedReplyWithCodexHistory(
+  ctx: CommandContext,
+  threadId: string,
+): Promise<string> {
+  if (ctx.chatMode !== 'p2p') return RESUME_APPLIED_REPLY;
+  const codex = ctx.controls.profileConfig.codex;
+  const binary = codex?.binaryPath;
+  if (!binary) return RESUME_APPLIED_REPLY;
+  const provider = ctx.codexTranscriptProvider ?? readCodexThreadTranscript;
+  try {
+    const turns = await provider({
+      binary,
+      threadId,
+      profileStateDir: commandProfilePaths(ctx).profileDir,
+      maxTurns: 10,
+      ...(codex.codexHome ? { codexHome: codex.codexHome } : {}),
+      ...(codex.inheritCodexHome !== undefined
+        ? { inheritCodexHome: codex.inheritCodexHome }
+        : {}),
+    });
+    const recentTurns = turns.slice(-10);
+    if (recentTurns.length === 0) return RESUME_APPLIED_REPLY;
+    return `${RESUME_APPLIED_REPLY}\n\n${formatCodexTranscriptPreview(recentTurns)}`;
+  } catch (err) {
+    log.warn('session', 'codex-transcript-failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return `${RESUME_APPLIED_REPLY}\n\n最近聊天记录读取失败；会话已恢复，可以继续发送消息。`;
+  }
+}
+
+function formatCodexTranscriptPreview(turns: CodexTranscriptTurn[]): string {
+  const lines = ['**最近 10 轮聊天记录**'];
+  turns.forEach((turn, index) => {
+    lines.push('', `**${index + 1}. 用户**`);
+    lines.push(turn.user ? quoteMarkdown(turn.user) : '> (无用户消息)');
+    if (turn.assistant) {
+      lines.push('', '**Codex**');
+      lines.push(quoteMarkdown(turn.assistant));
+    }
+  });
+  return lines.join('\n');
+}
+
+function quoteMarkdown(text: string): string {
+  const normalized = text.replace(/\r\n/g, '\n').trim();
+  if (!normalized) return '> (空)';
+  return normalized
+    .split('\n')
+    .map((line) => `> ${line}`)
+    .join('\n');
 }
 
 function issueResumeCandidate(
