@@ -302,6 +302,19 @@ describe('agent-aware resume commands', () => {
       expect(updates).toContain('任务进度更新');
       expect(updates).toContain('plus more');
     });
+
+    h.codexTranscripts.set('thread-alpha-secret', [
+      {
+        status: 'interrupted',
+        completedAtMs: 1_700_000_200_000,
+        user: 'new question',
+        assistant: 'partial answer plus more',
+      },
+    ]);
+    await vi.waitFor(() => {
+      const updates = JSON.stringify(h.channel.rawClient.requests);
+      expect(updates).toContain('Codex 任务跟踪已停止：任务已完成。');
+    });
   });
 
   it('resumes a Codex history selection from the card button callback', async () => {

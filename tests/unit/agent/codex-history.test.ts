@@ -171,6 +171,7 @@ describe('Codex thread history provider', () => {
     expect(turns).toEqual([
       {
         status: 'completed',
+        completedAtMs: 4000,
         user: 'second question',
         assistant: 'second answer',
       },

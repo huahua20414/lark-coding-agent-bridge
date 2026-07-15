@@ -30,6 +30,7 @@ export interface CodexThreadHistoryEntry {
 
 export interface CodexTranscriptTurn {
   status?: string;
+  completedAtMs?: number;
   user?: string;
   assistant?: string;
 }
@@ -409,8 +410,10 @@ function parseTranscriptTurn(input: unknown, maxMessageChars: number): CodexTran
       if (text) assistants.push(normalizeSessionPreview(text, maxMessageChars));
     }
   }
+  const completedAt = numberValue(raw?.completedAt);
   return {
     ...(stringValue(raw?.status) ? { status: stringValue(raw?.status) } : {}),
+    ...(completedAt ? { completedAtMs: Math.round(completedAt * 1000) } : {}),
     ...(users.length > 0 ? { user: users.join('\n\n') } : {}),
     ...(assistants.length > 0 ? { assistant: assistants.join('\n\n') } : {}),
   };

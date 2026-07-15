@@ -739,7 +739,7 @@ interface CodexResumeMessage {
 }
 
 function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMessage | undefined {
-  const ongoing = [...turns].reverse().find((turn) => isCodexResumeWatchableStatus(turn.status));
+  const ongoing = [...turns].reverse().find((turn) => isCodexResumeWatchableTurn(turn));
   if (ongoing) {
     const text = ongoing.assistant ?? ongoing.user;
     if (text) {
@@ -773,7 +773,12 @@ function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMess
 }
 
 function hasInProgressTurn(turns: CodexTranscriptTurn[]): boolean {
-  return turns.some((turn) => isCodexResumeWatchableStatus(turn.status));
+  return turns.some((turn) => isCodexResumeWatchableTurn(turn));
+}
+
+function isCodexResumeWatchableTurn(turn: CodexTranscriptTurn): boolean {
+  if (turn.completedAtMs !== undefined) return false;
+  return isCodexResumeWatchableStatus(turn.status);
 }
 
 function isCodexResumeWatchableStatus(status: string | undefined): boolean {
