@@ -148,6 +148,7 @@ export interface CommandContext {
   codexResumeWatch?: {
     pollIntervalMs?: number;
     timeoutMs?: number;
+    maxProgressMessages?: number;
   };
   claudeHistoryProvider?: (cwd: string, limit: number) => Promise<SessionSummary[]>;
   /** Set when invoked from a CardKit 2.0 form submit. Keys are input `name`s. */
@@ -172,7 +173,8 @@ interface ResumeCandidate {
 
 const RESUME_CANDIDATE_TTL_MS = 10 * 60 * 1000;
 const CODEX_RESUME_WATCH_TIMEOUT_MS = 20 * 60 * 1000;
-const CODEX_RESUME_WATCH_POLL_MS = 2000;
+const CODEX_RESUME_WATCH_POLL_MS = 10_000;
+const CODEX_RESUME_WATCH_MAX_PROGRESS_MESSAGES = 3;
 const resumeCandidates = new Map<string, ResumeCandidate>();
 const codexResumeWatchers = new Map<string, { cancel(): void }>();
 const AUDIT_SAFE_COMMAND_REPLY = '命令已处理。';
@@ -791,9 +793,9 @@ function startCodexResumeWatcher(
   let cancelled = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let lastFingerprint = initialFingerprint;
+  let progressMessages = 0;
   const startedAt = Date.now();
-  const pollMs = codexResumeWatchConfig(ctx).pollIntervalMs;
-  const timeoutMs = codexResumeWatchConfig(ctx).timeoutMs;
+  const watchConfig = codexResumeWatchConfig(ctx);
 
   const cancel = (): void => {
     cancelled = true;
@@ -805,12 +807,12 @@ function startCodexResumeWatcher(
     if (cancelled) return;
     timer = setTimeout(() => {
       void tick();
-    }, pollMs);
+    }, watchConfig.pollIntervalMs);
   };
 
   const tick = async (): Promise<void> => {
     if (cancelled) return;
-    if (Date.now() - startedAt >= timeoutMs) {
+    if (Date.now() - startedAt >= watchConfig.timeoutMs) {
       codexResumeWatchers.delete(key);
       await reply(ctx, 'Codex 任务跟踪已停止：超过 20 分钟。');
       return;
@@ -830,7 +832,10 @@ function startCodexResumeWatcher(
       const fingerprint = fingerprintCodexResumeMessage(message);
       if (fingerprint && fingerprint !== lastFingerprint) {
         lastFingerprint = fingerprint;
-        await reply(ctx, formatCodexResumeMessage(message));
+        if (!snapshot.hasInProgress || progressMessages < watchConfig.maxProgressMessages) {
+          if (snapshot.hasInProgress) progressMessages += 1;
+          await reply(ctx, formatCodexResumeMessage(message));
+        }
       } else if (!snapshot.hasInProgress && lastFingerprint) {
         await reply(ctx, 'Codex 任务已完成。');
       }
@@ -858,11 +863,17 @@ function cancelCodexResumeWatcher(ctx: CommandContext): void {
   codexResumeWatchers.delete(key);
 }
 
-function codexResumeWatchConfig(ctx: CommandContext): { pollIntervalMs: number; timeoutMs: number } {
+function codexResumeWatchConfig(ctx: CommandContext): {
+  pollIntervalMs: number;
+  timeoutMs: number;
+  maxProgressMessages: number;
+} {
   const overrides = ctx.codexResumeWatch;
   return {
     pollIntervalMs: overrides?.pollIntervalMs ?? CODEX_RESUME_WATCH_POLL_MS,
     timeoutMs: overrides?.timeoutMs ?? CODEX_RESUME_WATCH_TIMEOUT_MS,
+    maxProgressMessages:
+      overrides?.maxProgressMessages ?? CODEX_RESUME_WATCH_MAX_PROGRESS_MESSAGES,
   };
 }
 
