@@ -37,7 +37,7 @@ export interface CodexTranscriptTurn {
 
 export interface ListCodexThreadHistoryOptions {
   binary: string;
-  cwd: string;
+  cwd?: string;
   limit: number;
   profileStateDir: string;
   codexHome?: string;
@@ -339,7 +339,7 @@ function listRequest(options: ListCodexThreadHistoryOptions) {
       sortKey: 'updated_at',
       sortDirection: 'desc',
       archived: false,
-      cwd: options.cwd,
+      ...(options.cwd ? { cwd: options.cwd } : {}),
       useStateDbOnly: options.useStateDbOnly ?? true,
       sourceKinds: [...(options.sourceKinds ?? DEFAULT_SOURCE_KINDS)],
     },

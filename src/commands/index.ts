@@ -560,6 +560,9 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
   if (sub === 'use' && rest) {
     return applyResume(rest, ctx);
   }
+  if (sub === 'thread' && rest && ctx.fromCardAction) {
+    return applyCodexThreadResume(rest, ctx);
+  }
 
   // Default: list recent sessions
   const n = Number.parseInt(sub, 10);
@@ -670,19 +673,7 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
     if (resolved) {
       ctx.activeRuns.interrupt(ctx.scope);
       if (ctx.sessionCatalogIdentity.agentId === 'codex') {
-        ctx.sessionCatalog.upsertActive({
-          scopeId: ctx.sessionCatalogIdentity.scopeId,
-          agentId: 'codex',
-          cwdRealpath: ctx.sessionCatalogIdentity.cwdRealpath,
-          policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
-          threadId: resolved.threadId!,
-        });
-        const snapshot = await readCodexResumeSnapshot(ctx, resolved.threadId!);
-        if (snapshot?.hasInProgress) {
-          await startCodexResumeWatcher(ctx, resolved.threadId!, snapshot);
-        } else {
-          await reply(ctx, formatCodexResumeAppliedReply(snapshot));
-        }
+        await applyCodexThreadResume(resolved.threadId!, ctx);
         return;
       } else {
         ctx.sessionCatalog.upsertActive({
@@ -727,6 +718,32 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.sessions.set(ctx.scope, sessionId, cwd);
   await reply(ctx, RESUME_APPLIED_REPLY);
+}
+
+async function applyCodexThreadResume(threadId: string, ctx: CommandContext): Promise<void> {
+  if (
+    ctx.controls.profileConfig.agentKind !== 'codex' ||
+    !ctx.sessionCatalog ||
+    !ctx.sessionCatalogIdentity ||
+    ctx.sessionCatalogIdentity.agentId !== 'codex'
+  ) {
+    await reply(ctx, '当前上下文没有可恢复的 Codex thread，请先在当前工作区完成一次运行。');
+    return;
+  }
+  ctx.activeRuns.interrupt(ctx.scope);
+  ctx.sessionCatalog.upsertActive({
+    scopeId: ctx.sessionCatalogIdentity.scopeId,
+    agentId: 'codex',
+    cwdRealpath: ctx.sessionCatalogIdentity.cwdRealpath,
+    policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
+    threadId,
+  });
+  const snapshot = await readCodexResumeSnapshot(ctx, threadId);
+  if (snapshot?.hasInProgress) {
+    await startCodexResumeWatcher(ctx, threadId, snapshot);
+  } else {
+    await reply(ctx, formatCodexResumeAppliedReply(snapshot));
+  }
 }
 
 async function readCodexResumeSnapshot(

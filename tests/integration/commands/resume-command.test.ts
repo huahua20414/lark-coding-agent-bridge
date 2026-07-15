@@ -36,6 +36,7 @@ interface Harness {
   pending: PendingQueue;
   run(content: string, options?: { withCatalogIdentity?: boolean; chatMode?: 'p2p' | 'group' | 'topic' }): Promise<boolean>;
   dispatchResumeArg(arg: string): Promise<void>;
+  dispatchCardValue(value: Record<string, unknown>): Promise<void>;
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -346,6 +347,25 @@ describe('agent-aware resume commands', () => {
     expect(lastMarkdown(h.channel)).toContain('已完成');
   });
 
+  it('resumes a Codex thread directly from a completion notification button', async () => {
+    const h = await createHarness('codex');
+    h.codexTranscripts.set('thread-alpha-secret', [
+      {
+        status: 'completed',
+        completedAtMs: 1_700_000_200_000,
+        user: 'new question',
+        assistant: 'final answer',
+      },
+    ]);
+
+    await h.dispatchCardValue({ cmd: 'resume.thread', arg: 'thread-alpha-secret' });
+
+    expect(h.catalog.activeFor(h.identity)).toMatchObject({
+      threadId: 'thread-alpha-secret',
+    });
+    expect(lastMarkdown(h.channel)).toContain('最近消息读取失败；会话已恢复');
+  });
+
   it('keeps Codex resume history details out of group chats like Claude', async () => {
     const h = await createHarness('codex');
     h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
@@ -448,9 +468,12 @@ async function createHarness(
     });
 
   const dispatchResumeArg = (arg: string): Promise<void> =>
+    dispatchCardValue({ cmd: 'resume.use', arg });
+
+  const dispatchCardValue = (value: Record<string, unknown>): Promise<void> =>
     handleCardAction({
       channel: channel as unknown as Parameters<typeof handleCardAction>[0]['channel'],
-      evt: cardEvent({ cmd: 'resume.use', arg }),
+      evt: cardEvent(value),
       sessions,
       sessionCatalog: catalog,
       workspaces,
@@ -482,6 +505,7 @@ async function createHarness(
     pending,
     run,
     dispatchResumeArg,
+    dispatchCardValue,
   };
 }
 

@@ -181,6 +181,34 @@ export function codexResumeProgressCard(markdown: string): object {
   return shell('Codex 任务跟踪', [divMd(markdown)]);
 }
 
+export interface CodexCompletionResumeCardOptions {
+  preview: string;
+  relTime: string;
+  detail: string;
+  latestMessage?: string;
+  threadId: string;
+}
+
+export function codexCompletionResumeCard(opts: CodexCompletionResumeCardOptions): object {
+  const lines = [
+    '**任务完成**',
+    `${escapeMd(opts.preview)} · ${escapeMd(opts.relTime)} · ${escapeMd(opts.detail)}`,
+  ];
+  if (opts.latestMessage) {
+    lines.push('', '**最新消息**', escapeMd(opts.latestMessage));
+  }
+  return shell('Codex 任务完成', [
+    divMd(lines.join('\n')),
+    actions([
+      {
+        text: 'Resume',
+        value: { cmd: 'resume.thread', arg: opts.threadId },
+        style: 'primary',
+      },
+    ]),
+  ]);
+}
+
 export function helpCard(agentName = 'Agent'): object {
   const escapedAgentName = escapeMd(agentName);
   return shell('💡 使用帮助', [

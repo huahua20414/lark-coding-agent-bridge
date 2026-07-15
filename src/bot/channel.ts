@@ -66,6 +66,7 @@ import { lookupMessageThreadId } from './thread-id';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
+import { startCodexCompletionMonitor } from './codex-completion-monitor';
 import {
   consumeCotEvents,
   CotClient,
@@ -463,6 +464,13 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     domain: probeDomain,
     forceReconnect: () => controls.restart(),
   });
+  const codexCompletionMonitor = deps.appPaths?.mediaDir
+    ? startCodexCompletionMonitor({
+        channel,
+        controls,
+        profileDir: dirname(deps.appPaths.mediaDir),
+      })
+    : { stop() {} };
 
   return {
     channel,
@@ -471,6 +479,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       ownerRefresh.stop();
       knownChatsRefresh.stop();
       keepalive.stop();
+      codexCompletionMonitor.stop();
       pending.cancelAll();
       const [disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([
         channel.disconnect(),
