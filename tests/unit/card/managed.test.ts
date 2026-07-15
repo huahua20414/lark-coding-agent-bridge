@@ -32,6 +32,25 @@ describe('managed card sending', () => {
     );
   });
 
+  it('falls back to sending the raw card when card creation is unavailable', async () => {
+    const channel = {
+      createCard: vi.fn(async () => {
+        throw new Error('cardkit.card.create returned no card_id');
+      }),
+      send: vi.fn(async () => ({ messageId: 'om_create_fallback' })),
+      updateCardById: vi.fn(async () => {}),
+      updateCard: vi.fn(async () => {}),
+    };
+
+    const result = await sendManagedCard(channel as never, 'oc_chat', { body: 'form' });
+    await updateManagedCard(channel as never, 'om_create_fallback', { body: 'updated' });
+
+    expect(result).toEqual({ messageId: 'om_create_fallback' });
+    expect(channel.send).toHaveBeenCalledWith('oc_chat', { card: { body: 'form' } }, undefined);
+    expect(channel.updateCard).toHaveBeenCalledWith('om_create_fallback', { body: 'updated' });
+    expect(channel.updateCardById).not.toHaveBeenCalled();
+  });
+
   it('updates card-id managed messages by card id', async () => {
     const channel = {
       createCard: vi.fn(async () => ({ cardId: 'card_normal' })),
