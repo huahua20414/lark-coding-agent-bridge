@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute } from 'node:path';
@@ -561,7 +561,8 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
     return applyResume(rest, ctx);
   }
   if (sub === 'thread' && rest && ctx.fromCardAction) {
-    return applyCodexThreadResume(rest, ctx);
+    const target = parseCodexThreadResumeArg(rest);
+    return applyCodexThreadResume(target.threadId, ctx, { completedKey: target.completedKey });
   }
 
   // Default: list recent sessions
@@ -720,7 +721,11 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
   await reply(ctx, RESUME_APPLIED_REPLY);
 }
 
-async function applyCodexThreadResume(threadId: string, ctx: CommandContext): Promise<void> {
+async function applyCodexThreadResume(
+  threadId: string,
+  ctx: CommandContext,
+  opts: { completedKey?: string } = {},
+): Promise<void> {
   if (
     ctx.controls.profileConfig.agentKind !== 'codex' ||
     !ctx.sessionCatalog ||
@@ -738,7 +743,7 @@ async function applyCodexThreadResume(threadId: string, ctx: CommandContext): Pr
     policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
     threadId,
   });
-  const snapshot = await readCodexResumeSnapshot(ctx, threadId);
+  const snapshot = await readCodexResumeSnapshot(ctx, threadId, opts);
   if (snapshot?.hasInProgress) {
     await startCodexResumeWatcher(ctx, threadId, snapshot);
   } else {
@@ -749,6 +754,7 @@ async function applyCodexThreadResume(threadId: string, ctx: CommandContext): Pr
 async function readCodexResumeSnapshot(
   ctx: CommandContext,
   threadId: string,
+  opts: { completedKey?: string } = {},
 ): Promise<CodexResumeSnapshot | undefined> {
   if (ctx.chatMode !== 'p2p') return undefined;
   const codex = ctx.controls.profileConfig.codex;
@@ -768,6 +774,17 @@ async function readCodexResumeSnapshot(
         : {}),
     });
     const lastTurn = turns[turns.length - 1];
+    const requestedCompletion = opts.completedKey
+      ? selectCodexCompletionMessage(turns, threadId, opts.completedKey)
+      : undefined;
+    if (requestedCompletion) {
+      return {
+        hasInProgress: false,
+        message: requestedCompletion,
+        lastStatus: lastTurn?.status,
+        lastCompletedAtMs: lastTurn?.completedAtMs,
+      };
+    }
     return {
       hasInProgress: hasInProgressTurn(turns),
       message: selectCodexResumeMessage(turns),
@@ -835,6 +852,25 @@ function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMess
   return undefined;
 }
 
+function selectCodexCompletionMessage(
+  turns: CodexTranscriptTurn[],
+  threadId: string,
+  completedKey: string,
+): CodexResumeMessage | undefined {
+  const turn = turns.find(
+    (item) => isCompletedCodexTurn(item) && codexCompletionKey(threadId, item) === completedKey,
+  );
+  const text = turn?.finalAssistant ?? turn?.assistant;
+  if (!turn || !text) return undefined;
+  return {
+    label: '任务已完成',
+    role: 'Codex',
+    text,
+    ...(turn.status ? { status: turn.status } : {}),
+    ...(turn.completedAtMs !== undefined ? { completedAtMs: turn.completedAtMs } : {}),
+  };
+}
+
 function hasInProgressTurn(turns: CodexTranscriptTurn[]): boolean {
   return turns.some((turn) => isCodexResumeWatchableTurn(turn));
 }
@@ -842,6 +878,31 @@ function hasInProgressTurn(turns: CodexTranscriptTurn[]): boolean {
 function isCodexResumeWatchableTurn(turn: CodexTranscriptTurn): boolean {
   if (turn.completedAtMs !== undefined) return false;
   return isCodexResumeWatchableStatus(turn.status);
+}
+
+function isCompletedCodexTurn(turn: CodexTranscriptTurn): boolean {
+  if (turn.completedAtMs !== undefined) return true;
+  return turn.status === 'completed' || turn.status === 'success';
+}
+
+function codexCompletionKey(threadId: string, turn: CodexTranscriptTurn): string {
+  const marker =
+    turn.completedAtMs ??
+    `${turn.status ?? 'completed'}:${createHash('sha256')
+      .update(turn.finalAssistant ?? turn.assistant ?? '')
+      .update('\0')
+      .update(turn.user ?? '')
+      .digest('hex')
+      .slice(0, 16)}`;
+  return `${threadId}:${marker}`;
+}
+
+function parseCodexThreadResumeArg(input: string): { threadId: string; completedKey?: string } {
+  const [threadId = '', completedKey] = input.trim().split(/\s+/, 2);
+  return {
+    threadId,
+    ...(completedKey ? { completedKey } : {}),
+  };
 }
 
 function isCodexResumeWatchableStatus(status: string | undefined): boolean {

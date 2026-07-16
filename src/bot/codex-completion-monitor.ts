@@ -193,6 +193,7 @@ export class CodexCompletionMonitor {
       detail,
       ...(latest ? { latestMessage: normalizeSessionPreview(latest, 240) } : {}),
       threadId: item.thread.threadId,
+      completedKey: item.key,
     });
     try {
       await this.deps.channel.send(target, { card });

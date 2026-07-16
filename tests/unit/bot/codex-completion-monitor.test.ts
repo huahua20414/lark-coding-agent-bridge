@@ -79,6 +79,7 @@ describe('Codex completion monitor', () => {
     await monitor.tick();
     expect(sends).toHaveLength(1);
     expect(JSON.stringify(sends[0])).toContain('final answer');
+    expect(JSON.stringify(sends[0])).toContain('thread-active:1784111111000');
     expect(JSON.stringify(sends[0])).not.toContain('checking files');
 
     currentTurn = turn({

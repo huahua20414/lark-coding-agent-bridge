@@ -371,7 +371,40 @@ describe('agent-aware resume commands', () => {
     expect(h.catalog.activeFor(h.identity)).toMatchObject({
       threadId: 'thread-alpha-secret',
     });
-    expect(lastMarkdown(h.channel)).toContain('最近消息读取失败；会话已恢复');
+    expect(lastMarkdown(h.channel)).toContain('最新消息');
+    expect(lastMarkdown(h.channel)).toContain('final answer');
+    expect(lastMarkdown(h.channel)).not.toContain('progress before final');
+  });
+
+  it('shows the completion notification turn when the same Codex thread has newer work', async () => {
+    const h = await createHarness('codex');
+    h.codexTranscripts.set('thread-alpha-secret', [
+      {
+        status: 'completed',
+        completedAtMs: 1_700_000_200_000,
+        user: 'old task',
+        assistant: 'old progress\n\nnotified final answer',
+        finalAssistant: 'notified final answer',
+      },
+      {
+        status: 'inProgress',
+        user: 'new task',
+        assistant: 'new task progress',
+      },
+    ]);
+
+    await h.dispatchCardValue({
+      cmd: 'resume.thread',
+      arg: 'thread-alpha-secret thread-alpha-secret:1700000200000',
+    });
+
+    expect(h.catalog.activeFor(h.identity)).toMatchObject({
+      threadId: 'thread-alpha-secret',
+    });
+    const reply = lastMarkdown(h.channel);
+    expect(reply).toContain('任务已完成');
+    expect(reply).toContain('notified final answer');
+    expect(reply).not.toContain('new task progress');
   });
 
   it('keeps Codex resume history details out of group chats like Claude', async () => {
@@ -490,6 +523,7 @@ async function createHarness(
       controls,
       pending,
       chatModeCache,
+      codexTranscriptProvider: async (options) => codexTranscripts.get(options.threadId) ?? [],
     });
 
   cleanups.push(async () => {

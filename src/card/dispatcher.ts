@@ -10,6 +10,10 @@ import { log } from '../core/logger';
 import { canUseDm, canUseGroup } from '../policy/access';
 import type { RunExecutor } from '../runtime/run-executor';
 import type { SessionCatalog } from '../session/catalog';
+import type {
+  CodexTranscriptTurn,
+  ReadCodexThreadTranscriptOptions,
+} from '../session/codex-history';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
@@ -40,6 +44,9 @@ export interface CardDispatchDeps {
   callbackAuth?: CallbackAuth;
   callbackPolicyFingerprint?: string;
   callbackPolicyFingerprintForScope?: (scope: string) => string | undefined;
+  codexTranscriptProvider?: (
+    options: ReadCodexThreadTranscriptOptions,
+  ) => Promise<CodexTranscriptTurn[]>;
 }
 
 export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
@@ -111,6 +118,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
       processPool: deps.processPool,
       runExecutor: deps.runExecutor,
       controls: deps.controls,
+      codexTranscriptProvider: deps.codexTranscriptProvider,
       formValue,
       fromCardAction: true,
     };

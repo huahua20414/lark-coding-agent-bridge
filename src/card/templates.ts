@@ -187,6 +187,7 @@ export interface CodexCompletionResumeCardOptions {
   detail: string;
   latestMessage?: string;
   threadId: string;
+  completedKey: string;
 }
 
 export function codexCompletionResumeCard(opts: CodexCompletionResumeCardOptions): object {
@@ -202,7 +203,7 @@ export function codexCompletionResumeCard(opts: CodexCompletionResumeCardOptions
     actions([
       {
         text: 'Resume',
-        value: { cmd: 'resume.thread', arg: opts.threadId },
+        value: { cmd: 'resume.thread', arg: `${opts.threadId} ${opts.completedKey}` },
         style: 'primary',
       },
     ]),
