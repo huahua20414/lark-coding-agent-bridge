@@ -301,6 +301,50 @@ describe('agent-aware resume commands', () => {
     expect(rendered).not.toContain('> line one\n> \n> line two');
   });
 
+  it('continues Codex resume progress in new cards when one card reaches the length budget', async () => {
+    const h = await createHarness('codex', { codexResumeWatch: { maxCardChars: 260 } });
+    h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
+    h.codexTranscripts.set('thread-alpha-secret', [
+      { status: 'inProgress', assistant: 'partial answer' },
+    ]);
+
+    await expect(h.run('/resume')).resolves.toBe(true);
+    const [nonce] = resumeArgsFromCard(lastContent(h.channel));
+    await expect(h.run(`/resume use ${nonce}`)).resolves.toBe(true);
+
+    h.codexTranscripts.set('thread-alpha-secret', [
+      {
+        status: 'inProgress',
+        assistant: `partial answer ${'long progress update '.repeat(20)}`,
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      const sentCards = h.channel.sent.filter((message) =>
+        JSON.stringify(message.content).includes('Codex 任务跟踪'),
+      );
+      expect(sentCards.length).toBeGreaterThan(1);
+      expect(JSON.stringify(sentCards)).toContain('任务进度更新（续 2）');
+      expect(JSON.stringify(sentCards)).toContain('long progress update');
+    });
+
+    h.codexTranscripts.set('thread-alpha-secret', [
+      {
+        status: 'completed',
+        completedAtMs: 1_700_000_200_000,
+        assistant: `partial answer ${'long progress update '.repeat(20)} final answer`,
+        finalAssistant: 'final answer',
+      },
+    ]);
+    await vi.waitFor(() => {
+      const progressCardsAndUpdates = JSON.stringify([
+        h.channel.sent,
+        h.channel.rawClient.requests,
+      ]);
+      expect(progressCardsAndUpdates).toContain('Codex 任务跟踪已停止：任务已完成。');
+    });
+  });
+
   it('keeps watching an interrupted Codex transcript because app-server can mark active turns that way', async () => {
     const h = await createHarness('codex');
     h.codexHistory.push(codexThread('thread-alpha-secret', 'alpha prompt', 1_700_000_100_000));
@@ -449,7 +493,11 @@ describe('agent-aware resume commands', () => {
 
 async function createHarness(
   agentKind: AgentKind,
-  options: { bindWorkspace?: boolean; defaultWorkspace?: boolean } = {},
+  options: {
+    bindWorkspace?: boolean;
+    defaultWorkspace?: boolean;
+    codexResumeWatch?: CommandContext['codexResumeWatch'];
+  } = {},
 ): Promise<Harness> {
   const tmp = await createTmpProfile(`resume-command-${agentKind}-`);
   const channel = createFakeChannel();
@@ -505,7 +553,7 @@ async function createHarness(
       claudeHistoryProvider: async () => claudeHistory,
       codexHistoryProvider: async () => codexHistory,
       codexTranscriptProvider: async (options) => codexTranscripts.get(options.threadId) ?? [],
-      codexResumeWatch: { pollIntervalMs: 5, timeoutMs: 200 },
+      codexResumeWatch: { pollIntervalMs: 5, timeoutMs: 200, ...options.codexResumeWatch },
     });
 
   const dispatchResumeArg = (arg: string): Promise<void> =>

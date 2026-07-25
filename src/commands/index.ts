@@ -156,6 +156,7 @@ export interface CommandContext {
   codexResumeWatch?: {
     pollIntervalMs?: number;
     timeoutMs?: number;
+    maxCardChars?: number;
   };
   claudeHistoryProvider?: (cwd: string, limit: number) => Promise<SessionSummary[]>;
   /** Set when invoked from a CardKit 2.0 form submit. Keys are input `name`s. */
@@ -181,6 +182,7 @@ interface ResumeCandidate {
 const RESUME_CANDIDATE_TTL_MS = 10 * 60 * 1000;
 const CODEX_RESUME_WATCH_TIMEOUT_MS = 60 * 60 * 1000;
 const CODEX_RESUME_WATCH_POLL_MS = 5000;
+const CODEX_RESUME_WATCH_CARD_MAX_CHARS = 3000;
 const resumeCandidates = new Map<string, ResumeCandidate>();
 const codexResumeWatchers = new Map<string, { cancel(): void }>();
 const AUDIT_SAFE_COMMAND_REPLY = '命令已处理。';
@@ -815,6 +817,20 @@ interface CodexResumeMessage {
   completedAtMs?: number;
 }
 
+interface CodexResumeProgressPage {
+  messageId?: string;
+  pageNumber: number;
+  lines: string[];
+  dirty: boolean;
+  flushedLineCount: number;
+}
+
+interface CodexResumeProgressPager {
+  ctx: CommandContext;
+  maxCardChars: number;
+  pages: CodexResumeProgressPage[];
+}
+
 function selectCodexResumeMessage(turns: CodexTranscriptTurn[]): CodexResumeMessage | undefined {
   const ongoing = [...turns].reverse().find((turn) => isCodexResumeWatchableTurn(turn));
   if (ongoing) {
@@ -954,11 +970,9 @@ async function startCodexResumeWatcher(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let lastMessage = initialSnapshot.message;
   let lastFingerprint = fingerprintCodexResumeMessage(lastMessage);
-  const cardLines = [RESUME_APPLIED_REPLY];
-  if (lastMessage) cardLines.push('', formatCodexResumeMessage(lastMessage));
   const startedAt = Date.now();
   const watchConfig = codexResumeWatchConfig(ctx);
-  let progressMessageId: string;
+  const progressPager = createCodexResumeProgressPager(ctx, watchConfig.maxCardChars);
 
   const cancel = (): void => {
     cancelled = true;
@@ -966,20 +980,19 @@ async function startCodexResumeWatcher(
   };
 
   try {
-    const sent = await sendManagedCard(
-      ctx.channel,
-      ctx.msg.chatId,
-      codexResumeProgressCard(cardLines.join('\n')),
-      commandReplyOptions(ctx),
+    await appendCodexResumeProgressLines(
+      progressPager,
+      lastMessage ? ['', ...formatCodexResumeMessage(lastMessage).split('\n')] : [],
     );
-    progressMessageId = sent.messageId;
     log.info('session', 'codex-resume-watch-started', {
       threadId,
       pollIntervalMs: watchConfig.pollIntervalMs,
       timeoutMs: watchConfig.timeoutMs,
+      maxCardChars: watchConfig.maxCardChars,
       initialStatus: lastMessage?.status,
       initialCompletedAtMs: lastMessage?.completedAtMs,
       hasInitialMessage: Boolean(lastMessage),
+      pages: progressPager.pages.length,
     });
   } catch (err) {
     log.warn('session', 'codex-resume-watch-card-send-failed', {
@@ -1002,8 +1015,7 @@ async function startCodexResumeWatcher(
     if (cancelled) return;
     if (Date.now() - startedAt >= watchConfig.timeoutMs) {
       codexResumeWatchers.delete(key);
-      appendCodexResumeStopStatus(cardLines, 'Codex 任务跟踪已停止：超过 1 小时。');
-      await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
+      await appendCodexResumeStopStatus(progressPager, 'Codex 任务跟踪已停止：超过 1 小时。');
       log.info('session', 'codex-resume-watch-timeout', { threadId });
       return;
     }
@@ -1024,24 +1036,24 @@ async function startCodexResumeWatcher(
       const fingerprint = fingerprintCodexResumeMessage(message);
       if (fingerprint && fingerprint !== lastFingerprint) {
         lastFingerprint = fingerprint;
-        const appended = appendCodexResumeMessage(cardLines, lastMessage, message);
+        const appended = await appendCodexResumeMessage(progressPager, lastMessage, message);
         lastMessage = message;
         if (appended) changed = true;
       } else if (!snapshot.hasInProgress && lastFingerprint) {
-        appendCodexResumeStopStatus(cardLines, 'Codex 任务跟踪已停止：任务已完成。');
-        changed = true;
+        changed =
+          (await appendCodexResumeStopStatus(progressPager, 'Codex 任务跟踪已停止：任务已完成。')) ||
+          changed;
       }
     }
     if (!snapshot?.hasInProgress) {
-      appendCodexResumeStopStatus(
-        cardLines,
-        snapshot?.message
-          ? 'Codex 任务跟踪已停止：任务已完成。'
-          : 'Codex 任务跟踪已停止：当前会话暂无进行中的任务。',
-      );
-      changed = true;
+      changed =
+        (await appendCodexResumeStopStatus(
+          progressPager,
+          snapshot?.message
+            ? 'Codex 任务跟踪已停止：任务已完成。'
+            : 'Codex 任务跟踪已停止：当前会话暂无进行中的任务。',
+        )) || changed;
     }
-    if (changed) await updateCodexResumeProgressCard(ctx, progressMessageId, cardLines);
     log.info('session', 'codex-resume-watch-tick', {
       threadId,
       status: snapshot?.message?.status,
@@ -1051,6 +1063,7 @@ async function startCodexResumeWatcher(
       hasInProgress: snapshot?.hasInProgress === true,
       hasMessage: Boolean(snapshot?.message),
       changed,
+      pages: progressPager.pages.length,
     });
 
     if (!snapshot?.hasInProgress) {
@@ -1074,25 +1087,150 @@ async function updateCodexResumeProgressCard(
   ctx: CommandContext,
   messageId: string,
   lines: string[],
-): Promise<void> {
+): Promise<boolean> {
   try {
     await updateManagedCard(ctx.channel, messageId, codexResumeProgressCard(lines.join('\n')));
     log.info('session', 'codex-resume-watch-card-updated', {
       messageId,
       lines: lines.length,
     });
+    return true;
   } catch (err) {
     log.warn('session', 'codex-resume-watch-card-update-failed', {
       message: err instanceof Error ? err.message : String(err),
     });
+    return false;
   }
 }
 
-function appendCodexResumeMessage(
+function createCodexResumeProgressPager(
+  ctx: CommandContext,
+  maxCardChars: number,
+): CodexResumeProgressPager {
+  return {
+    ctx,
+    maxCardChars,
+    pages: [
+      {
+        pageNumber: 1,
+        lines: [RESUME_APPLIED_REPLY],
+        dirty: true,
+        flushedLineCount: 0,
+      },
+    ],
+  };
+}
+
+async function appendCodexResumeProgressLines(
+  pager: CodexResumeProgressPager,
   lines: string[],
+): Promise<void> {
+  const pending = lines.flatMap((line) => splitCodexResumeProgressLine(line, pager.maxCardChars));
+  for (const line of pending) {
+    let page = latestCodexResumeProgressPage(pager);
+    if (shouldStartCodexResumeProgressPage(page, line, pager.maxCardChars)) {
+      await flushCodexResumeProgressPage(pager, page);
+      page = startCodexResumeContinuationPage(pager);
+      if (line === '') continue;
+    }
+    page.lines.push(line);
+    page.dirty = true;
+  }
+  await flushCodexResumeProgressPage(pager, latestCodexResumeProgressPage(pager));
+}
+
+function latestCodexResumeProgressPage(pager: CodexResumeProgressPager): CodexResumeProgressPage {
+  const page = pager.pages.at(-1);
+  if (!page) throw new Error('Codex resume progress pager has no pages');
+  return page;
+}
+
+function startCodexResumeContinuationPage(
+  pager: CodexResumeProgressPager,
+): CodexResumeProgressPage {
+  const pageNumber = pager.pages.length + 1;
+  const page = {
+    pageNumber,
+    lines: [`任务进度更新（续 ${pageNumber}）`],
+    dirty: true,
+    flushedLineCount: 0,
+  } satisfies CodexResumeProgressPage;
+  pager.pages.push(page);
+  log.info('session', 'codex-resume-watch-card-page-started', {
+    pageNumber,
+  });
+  return page;
+}
+
+async function flushCodexResumeProgressPage(
+  pager: CodexResumeProgressPager,
+  page: CodexResumeProgressPage,
+): Promise<void> {
+  if (!page.dirty) return;
+  if (page.messageId) {
+    const updated = await updateCodexResumeProgressCard(pager.ctx, page.messageId, page.lines);
+    if (!updated) {
+      const overflow = page.lines.slice(page.flushedLineCount);
+      page.lines = page.lines.slice(0, page.flushedLineCount);
+      page.dirty = false;
+      if (overflow.length > 0) {
+        startCodexResumeContinuationPage(pager);
+        await appendCodexResumeProgressLines(pager, overflow);
+      }
+      return;
+    }
+    page.flushedLineCount = page.lines.length;
+    page.dirty = false;
+    return;
+  }
+  const sent = await sendManagedCard(
+    pager.ctx.channel,
+    pager.ctx.msg.chatId,
+    codexResumeProgressCard(page.lines.join('\n')),
+    commandReplyOptions(pager.ctx),
+  );
+  page.messageId = sent.messageId;
+  page.flushedLineCount = page.lines.length;
+  page.dirty = false;
+  log.info('session', 'codex-resume-watch-card-sent', {
+    messageId: page.messageId,
+    pageNumber: page.pageNumber,
+    lines: page.lines.length,
+  });
+}
+
+function shouldStartCodexResumeProgressPage(
+  page: CodexResumeProgressPage,
+  nextLine: string,
+  maxCardChars: number,
+): boolean {
+  if (page.lines.length <= 1 && nextLine === '') return false;
+  if (page.lines.length <= 1) return false;
+  return codexResumeProgressLength([...page.lines, nextLine]) > maxCardChars;
+}
+
+function splitCodexResumeProgressLine(line: string, maxCardChars: number): string[] {
+  const chunkSize = Math.max(120, maxCardChars - 240);
+  if (line.length <= chunkSize) return [line];
+
+  const prefix = line.startsWith('> ') ? '> ' : '';
+  const body = prefix ? line.slice(prefix.length) : line;
+  const chunks: string[] = [];
+  for (let start = 0; start < body.length; start += chunkSize) {
+    chunks.push(`${prefix}${body.slice(start, start + chunkSize)}`);
+  }
+  return chunks;
+}
+
+function codexResumeProgressLength(lines: string[]): number {
+  return lines.join('\n').length;
+}
+
+async function appendCodexResumeMessage(
+  pager: CodexResumeProgressPager,
   previous: CodexResumeMessage | undefined,
   next: CodexResumeMessage,
-): boolean {
+): Promise<boolean> {
   const delta =
     previous &&
     previous.role === next.role &&
@@ -1100,16 +1238,25 @@ function appendCodexResumeMessage(
       ? next.text.slice(previous.text.length).trim()
       : undefined;
   if (delta) {
-    lines.push('', `**${next.label} · ${next.role}**`, quoteMarkdown(delta));
+    await appendCodexResumeProgressLines(pager, [
+      '',
+      `**${next.label} · ${next.role}**`,
+      ...quoteMarkdown(delta).split('\n'),
+    ]);
     return true;
   }
-  lines.push('', formatCodexResumeMessage(next));
+  await appendCodexResumeProgressLines(pager, ['', ...formatCodexResumeMessage(next).split('\n')]);
   return true;
 }
 
-function appendCodexResumeStopStatus(lines: string[], status: string): void {
-  if (lines[lines.length - 1] === status) return;
-  lines.push('', status);
+async function appendCodexResumeStopStatus(
+  pager: CodexResumeProgressPager,
+  status: string,
+): Promise<boolean> {
+  const lines = latestCodexResumeProgressPage(pager).lines;
+  if (lines[lines.length - 1] === status) return false;
+  await appendCodexResumeProgressLines(pager, ['', status]);
+  return true;
 }
 
 function codexResumeWatcherKey(ctx: CommandContext): string {
@@ -1127,11 +1274,13 @@ function cancelCodexResumeWatcher(ctx: CommandContext): void {
 function codexResumeWatchConfig(ctx: CommandContext): {
   pollIntervalMs: number;
   timeoutMs: number;
+  maxCardChars: number;
 } {
   const overrides = ctx.codexResumeWatch;
   return {
     pollIntervalMs: overrides?.pollIntervalMs ?? CODEX_RESUME_WATCH_POLL_MS,
     timeoutMs: overrides?.timeoutMs ?? CODEX_RESUME_WATCH_TIMEOUT_MS,
+    maxCardChars: overrides?.maxCardChars ?? CODEX_RESUME_WATCH_CARD_MAX_CHARS,
   };
 }
 
